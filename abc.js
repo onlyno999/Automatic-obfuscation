@@ -5,7 +5,7 @@ export default {
 
     if ('websocket' !== c) {
       // 订阅地址访问控制
-      if (设置 && b.pathname === `/${config.id}/vless`) {
+      if (set && b.pathname === `/${config.id}/vless`) {
         return new Response(generateVlessConfig(a.headers.get('Host')), {
           status: 200,
           headers: { 'Content-Type': 'text/plain;charset=utf-8' }
