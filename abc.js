@@ -1,3 +1,9 @@
+// Random noise code for obfuscation  
+const dummyNoise = (() => {  
+  const rand = Math.random();  
+  return rand > 0.5 ? 'no-op' : 'noise';  
+})();  
+
 export default {  
   async fetch(request) {  
     const url = new URL(request.url);  
