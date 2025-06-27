@@ -1,5 +1,3 @@
-let NAT64 = true;              // ← 改名：默认开启 NAT64
-
 let 我的节点名字 = '天书暴躁版';
 
 const 读取环境变量 = (name, fallback, env) => {
@@ -18,7 +16,6 @@ const 读取环境变量 = (name, fallback, env) => {
   return raw;
 };
 
-/* ---------- NAT64 工具 ---------- */
 function convertToNAT64IPv6(ipv4) {
   const parts = ipv4.split('.');
   if (parts.length !== 4) throw new Error('无效的IPv4地址');
@@ -48,14 +45,13 @@ export default {
     私钥开关             = 读取环境变量('私钥开关',   私钥开关,         env);
     嘲讽语               = 读取环境变量('嘲讽语',     嘲讽语,           env);
     启用反代功能         = 读取环境变量('启用反代功能', 启用反代功能, env);
-    NAT64               = 读取环境变量('NAT64',      NAT64,           env);   // ← 改名
+    NAT64               = 读取环境变量('NAT64',      NAT64,           env);
     我的节点名字           = 读取环境变量('我的节点名字', 我的节点名字,   env);
 
     const 升级标头 = 访问请求.headers.get('Upgrade');
     const url = new URL(访问请求.url);
 
     if (!升级标头 || 升级标头 !== 'websocket') {
-      /* ---- 订阅/普通响应代码保持原样 ---- */
       if (我的优选TXT) {
         const 链接数组 = Array.isArray(我的优选TXT) ? 我的优选TXT : [我的优选TXT];
         const 所有节点 = [];
@@ -96,21 +92,17 @@ export default {
       if (验证VL的密钥(new Uint8Array(data.slice(1, 17))) !== 哎呀呀这是我的VL密钥) {
         return new Response('无效的UUID', { status: 403 });
       }
-      const { tcpSocket, udpSocket, initialData, isUDP } = await 解析VL标头(data);
-      return await 升级WS请求(访问请求, tcpSocket, udpSocket, initialData, isUDP);
+      const { tcpSocket, initialData } = await 解析VL标头(data);
+      return await 升级WS请求(访问请求, tcpSocket, initialData);
     }
   }
 };
 
-async function 升级WS请求(访问请求, tcpSocket, udpSocket, init, isUDP) {
-  const { 访问端, WS接口 } = new WebSocketPair();
+async function 升级WS请求(访问请求, tcpSocket, initialData) {
+  const { 0: 客户端, 1: WS接口 } = new WebSocketPair();
   WS接口.accept();
-  if (isUDP && udpSocket) {
-    建立UDP管道(WS接口, udpSocket, init);
-  } else {
-    建立传输管道(WS接口, tcpSocket, init);
-  }
-  return new Response(null, { status: 101, webSocket: 访问端 });
+  建立传输管道(WS接口, tcpSocket, initialData);
+  return new Response(null, { status: 101, webSocket: 客户端 });
 }
 
 function 使用64位加解密(str) {
@@ -121,8 +113,6 @@ function 使用64位加解密(str) {
 async function 解析VL标头(buf) {
   const b = new DataView(buf), c = new Uint8Array(buf);
   const addrTypeIndex = c[17];
-  const command = c[18 + addrTypeIndex]; 
-  const isUDP = command === 2;
   const port = b.getUint16(18 + addrTypeIndex + 1);
   let offset = 18 + addrTypeIndex + 4;
   let host;
@@ -140,31 +130,12 @@ async function 解析VL标头(buf) {
   }
   const initialData = buf.slice(offset);
 
-  if (isUDP) {
-    const udpSocket = new DatagramSocket();
-    let natHost = host;
-    if (NAT64) {
-      if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
-        natHost = convertToNAT64IPv6(host).slice(1, -1);
-      } else if (host.includes(':')) {
-        natHost = host;
-      } else {
-        natHost = (await getIPv6ProxyAddress(host)).slice(1, -1);
-      }
-    }
-    await udpSocket.bind({ port: 0, hostname: "::" });
-    udpSocket.send(initialData, { hostname: natHost, port });
-    return { tcpSocket: null, udpSocket, initialData: null, isUDP: true };
-  }
-
-  /* --------- 1. 直连 --------- */
   try {
     const tcpSocket = await connect({ hostname: host, port });
     await tcpSocket.opened;
-    return { tcpSocket, udpSocket: null, initialData, isUDP: false };
-  } catch { /* ignore */ }
+    return { tcpSocket, initialData };
+  } catch {}
 
-  /* --------- 2. NAT64 --------- */
   if (NAT64) {
     try {
       let natTarget;
@@ -175,30 +146,23 @@ async function 解析VL标头(buf) {
       } else {
         natTarget = await getIPv6ProxyAddress(host);
       }
-      const natSock = await connect({ hostname: natTarget.replace(/^|$/g, ''), port });
+      const natSock = await connect({ hostname: natTarget.replace(/^\[|\]$/g, ''), port });
       await natSock.opened;
-      return { tcpSocket: natSock, udpSocket: null, initialData, isUDP: false };
-    } catch { /* ignore */ }
+      return { tcpSocket: natSock, initialData };
+    } catch {}
+
+    try {
+      const udpSocket = await connect({ hostname: host, port, transport: 'udp' });
+      await udpSocket.opened;
+      return { tcpSocket: udpSocket, initialData };
+    } catch {}
   }
 
-  /* --------- 3. 反代兜底 --------- */
   if (!启用反代功能 || !反代IP) throw Error('连接失败');
   const [h, p] = 反代IP.split(':');
   const tcpSocket = await connect({ hostname: h, port: Number(p) || port });
   await tcpSocket.opened;
-  return { tcpSocket, udpSocket: null, initialData, isUDP: false };
-}
-
-async function 建立UDP管道(ws, udpSocket, init) {
-  // UDP over WebSocket，VLESS UDP 不回显 init，直接透传后续消息
-  udpSocket.addEventListener('message', ev => {
-    try { ws.send(ev.data); } catch {}
-  });
-  ws.addEventListener('message', ev => {
-    try {
-      udpSocket.send(ev.data, ev.data.__remoteAddr);
-    } catch {}
-  });
+  return { tcpSocket, initialData };
 }
 
 async function 建立传输管道(ws, tcp, init) {
@@ -236,8 +200,7 @@ function 给我订阅页面(ID, host) {
 
 function 给我通用配置文件(host) {
   我的优选.push(`${host}:443#备用节点`);
-  if (私钥开关) return '请先关闭私钥功能';
-
+  if (私钥开关) return '请先关闭私钥��能';
   return 我的优选.map(item => {
     const [main, tls] = item.split("@");
     const [addrPort, name = 我的节点名字] = main.split("#");
