@@ -1,3 +1,5 @@
+let NAT64 = true;              // ← 改名：默认开启 NAT64
+
 let 我的节点名字 = '天书暴躁版';
 
 const 读取环境变量 = (name, fallback, env) => {
@@ -16,6 +18,7 @@ const 读取环境变量 = (name, fallback, env) => {
   return raw;
 };
 
+/* ---------- NAT64 工具 ---------- */
 function convertToNAT64IPv6(ipv4) {
   const parts = ipv4.split('.');
   if (parts.length !== 4) throw new Error('无效的IPv4地址');
@@ -45,13 +48,14 @@ export default {
     私钥开关             = 读取环境变量('私钥开关',   私钥开关,         env);
     嘲讽语               = 读取环境变量('嘲讽语',     嘲讽语,           env);
     启用反代功能         = 读取环境变量('启用反代功能', 启用反代功能, env);
-    NAT64               = 读取环境变量('NAT64',      NAT64,           env);
+    NAT64               = 读取环境变量('NAT64',      NAT64,           env);   // ← 改名
     我的节点名字           = 读取环境变量('我的节点名字', 我的节点名字,   env);
 
     const 升级标头 = 访问请求.headers.get('Upgrade');
     const url = new URL(访问请求.url);
 
     if (!升级标头 || 升级标头 !== 'websocket') {
+      /* ---- 订阅/普通响应代码保持原样 ---- */
       if (我的优选TXT) {
         const 链接数组 = Array.isArray(我的优选TXT) ? 我的优选TXT : [我的优选TXT];
         const 所有节点 = [];
@@ -130,12 +134,14 @@ async function 解析VL标头(buf) {
   }
   const initialData = buf.slice(offset);
 
+  /* --------- 1. 直连 --------- */
   try {
     const tcpSocket = await connect({ hostname: host, port });
     await tcpSocket.opened;
     return { tcpSocket, initialData };
-  } catch {}
+  } catch { /* ignore */ }
 
+  /* --------- 2. NAT64 --------- */
   if (NAT64) {
     try {
       let natTarget;
@@ -146,18 +152,13 @@ async function 解析VL标头(buf) {
       } else {
         natTarget = await getIPv6ProxyAddress(host);
       }
-      const natSock = await connect({ hostname: natTarget.replace(/^\[|\]$/g, ''), port });
+      const natSock = await connect({ hostname: natTarget.replace(/^|$/g, ''), port });
       await natSock.opened;
       return { tcpSocket: natSock, initialData };
-    } catch {}
-
-    try {
-      const udpSocket = await connect({ hostname: host, port, transport: 'udp' });
-      await udpSocket.opened;
-      return { tcpSocket: udpSocket, initialData };
-    } catch {}
+    } catch { /* ignore */ }
   }
 
+  /* --------- 3. 反代兜底 --------- */
   if (!启用反代功能 || !反代IP) throw Error('连接失败');
   const [h, p] = 反代IP.split(':');
   const tcpSocket = await connect({ hostname: h, port: Number(p) || port });
@@ -200,7 +201,8 @@ function 给我订阅页面(ID, host) {
 
 function 给我通用配置文件(host) {
   我的优选.push(`${host}:443#备用节点`);
-  if (私钥开关) return '请先关闭私钥��能';
+  if (私钥开关) return '请先关闭私钥功能';
+
   return 我的优选.map(item => {
     const [main, tls] = item.split("@");
     const [addrPort, name = 我的节点名字] = main.split("#");
