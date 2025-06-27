@@ -96,17 +96,21 @@ export default {
       if (验证VL的密钥(new Uint8Array(data.slice(1, 17))) !== 哎呀呀这是我的VL密钥) {
         return new Response('无效的UUID', { status: 403 });
       }
-      const { tcpSocket, initialData } = await 解析VL标头(data);
-      return await 升级WS请求(访问请求, tcpSocket, initialData);
+      const { tcpSocket, udpSocket, initialData, isUDP } = await 解析VL标头(data);
+      return await 升级WS请求(访问请求, tcpSocket, udpSocket, initialData, isUDP);
     }
   }
 };
 
-async function 升级WS请求(访问请求, tcpSocket, initialData) {
-  const { 0: 客户端, 1: WS接口 } = new WebSocketPair();
+async function 升级WS请求(访问请求, tcpSocket, udpSocket, init, isUDP) {
+  const { 访问端, WS接口 } = new WebSocketPair();
   WS接口.accept();
-  建立传输管道(WS接口, tcpSocket, initialData);
-  return new Response(null, { status: 101, webSocket: 客户端 });
+  if (isUDP && udpSocket) {
+    建立UDP管道(WS接口, udpSocket, init);
+  } else {
+    建立传输管道(WS接口, tcpSocket, init);
+  }
+  return new Response(null, { status: 101, webSocket: 访问端 });
 }
 
 function 使用64位加解密(str) {
@@ -117,6 +121,8 @@ function 使用64位加解密(str) {
 async function 解析VL标头(buf) {
   const b = new DataView(buf), c = new Uint8Array(buf);
   const addrTypeIndex = c[17];
+  const command = c[18 + addrTypeIndex]; 
+  const isUDP = command === 2;
   const port = b.getUint16(18 + addrTypeIndex + 1);
   let offset = 18 + addrTypeIndex + 4;
   let host;
@@ -134,11 +140,28 @@ async function 解析VL标头(buf) {
   }
   const initialData = buf.slice(offset);
 
+  if (isUDP) {
+    const udpSocket = new DatagramSocket();
+    let natHost = host;
+    if (NAT64) {
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+        natHost = convertToNAT64IPv6(host).slice(1, -1);
+      } else if (host.includes(':')) {
+        natHost = host;
+      } else {
+        natHost = (await getIPv6ProxyAddress(host)).slice(1, -1);
+      }
+    }
+    await udpSocket.bind({ port: 0, hostname: "::" });
+    udpSocket.send(initialData, { hostname: natHost, port });
+    return { tcpSocket: null, udpSocket, initialData: null, isUDP: true };
+  }
+
   /* --------- 1. 直连 --------- */
   try {
     const tcpSocket = await connect({ hostname: host, port });
     await tcpSocket.opened;
-    return { tcpSocket, initialData };
+    return { tcpSocket, udpSocket: null, initialData, isUDP: false };
   } catch { /* ignore */ }
 
   /* --------- 2. NAT64 --------- */
@@ -154,7 +177,7 @@ async function 解析VL标头(buf) {
       }
       const natSock = await connect({ hostname: natTarget.replace(/^|$/g, ''), port });
       await natSock.opened;
-      return { tcpSocket: natSock, initialData };
+      return { tcpSocket: natSock, udpSocket: null, initialData, isUDP: false };
     } catch { /* ignore */ }
   }
 
@@ -163,7 +186,19 @@ async function 解析VL标头(buf) {
   const [h, p] = 反代IP.split(':');
   const tcpSocket = await connect({ hostname: h, port: Number(p) || port });
   await tcpSocket.opened;
-  return { tcpSocket, initialData };
+  return { tcpSocket, udpSocket: null, initialData, isUDP: false };
+}
+
+async function 建立UDP管道(ws, udpSocket, init) {
+  // UDP over WebSocket，VLESS UDP 不回显 init，直接透传后续消息
+  udpSocket.addEventListener('message', ev => {
+    try { ws.send(ev.data); } catch {}
+  });
+  ws.addEventListener('message', ev => {
+    try {
+      udpSocket.send(ev.data, ev.data.__remoteAddr);
+    } catch {}
+  });
 }
 
 async function 建立传输管道(ws, tcp, init) {
