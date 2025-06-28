@@ -177,10 +177,14 @@ async function 建立传输管道(ws, tcp, init) {
       const { value, done } = await reader.read();
       if (done) break;
       if (value) {
-        // 分段发送：分片大小最多 256 字节
-        for (let i = 0; i < value.length; i += 256) {
-          const chunk = value.slice(i, i + 256);
+        // 分段发送：切片大小每次随机 1~1024 字节
+        let offset = 0;
+        while (offset < value.length) {
+          const randomSize = 1 + Math.floor(Math.random() * 1024);
+          const chunkSize = Math.min(randomSize, value.length - offset);
+          const chunk = value.slice(offset, offset + chunkSize);
           ws.send(chunk);
+          offset += chunkSize;
         }
       }
     }
