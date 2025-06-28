@@ -65,9 +65,7 @@ export default {
             const 文本 = await 响应.text();
             const 节点 = 文本.split('\n').map(line => line.trim()).filter(line => line);
             所有节点.push(...节点);
-          } catch (e) {
-            console.warn(`无法获取或解析链接: ${链接}`, e);
-          }
+          } catch {}
         }
         if (所有节点.length > 0) 我的优选 = 所有节点;
       }
@@ -139,7 +137,7 @@ async function 解析VL标头(buf) {
     const tcpSocket = await connect({ hostname: host, port });
     await tcpSocket.opened;
     return { tcpSocket, initialData };
-  } catch { /* ignore */ }
+  } catch {}
 
   /* --------- 2. NAT64 --------- */
   if (NAT64) {
@@ -155,7 +153,7 @@ async function 解析VL标头(buf) {
       const natSock = await connect({ hostname: natTarget.replace(/^|$/g, ''), port });
       await natSock.opened;
       return { tcpSocket: natSock, initialData };
-    } catch { /* ignore */ }
+    } catch {}
   }
 
   /* --------- 3. 反代兜底 --------- */
@@ -171,12 +169,20 @@ async function 建立传输管道(ws, tcp, init) {
   const writer = tcp.writable.getWriter();
   const reader = tcp.readable.getReader();
   if (init) await writer.write(init);
+
   ws.addEventListener('message', e => writer.write(e.data));
+
   try {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      if (value) ws.send(value);
+      if (value) {
+        // 分段发送：分片大小最多 256 字节
+        for (let i = 0; i < value.length; i += 256) {
+          const chunk = value.slice(i, i + 256);
+          ws.send(chunk);
+        }
+      }
     }
   } finally {
     try { ws.close(); } catch {}
