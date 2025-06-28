@@ -1,4 +1,4 @@
-let NAT64 = true;              // ← 改名：默认开启 NAT64
+let NAT64 = true; // ← 改名：默认开启 
 
 let 我的节点名字 = '天书暴躁版';
 
@@ -65,7 +65,9 @@ export default {
             const 文本 = await 响应.text();
             const 节点 = 文本.split('\n').map(line => line.trim()).filter(line => line);
             所有节点.push(...节点);
-          } catch {}
+          } catch (e) {
+            console.warn(`无法获取或解析链接: ${链接}`, e);
+          }
         }
         if (所有节点.length > 0) 我的优选 = 所有节点;
       }
@@ -131,95 +133,3 @@ async function 解析VL标头(buf) {
     offset += 16;
   }
   const initialData = buf.slice(offset);
-
-  /* --------- 1. 直连 --------- */
-  try {
-    const tcpSocket = await connect({ hostname: host, port });
-    await tcpSocket.opened;
-    return { tcpSocket, initialData };
-  } catch {}
-
-  /* --------- 2. NAT64 --------- */
-  if (NAT64) {
-    try {
-      let natTarget;
-      if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
-        natTarget = convertToNAT64IPv6(host);
-      } else if (host.includes(':')) {
-        throw new Error('IPv6 地址无需 NAT64');
-      } else {
-        natTarget = await getIPv6ProxyAddress(host);
-      }
-      const natSock = await connect({ hostname: natTarget.replace(/^|$/g, ''), port });
-      await natSock.opened;
-      return { tcpSocket: natSock, initialData };
-    } catch {}
-  }
-
-  /* --------- 3. 反代兜底 --------- */
-  if (!启用反代功能 || !反代IP) throw Error('连接失败');
-  const [h, p] = 反代IP.split(':');
-  const tcpSocket = await connect({ hostname: h, port: Number(p) || port });
-  await tcpSocket.opened;
-  return { tcpSocket, initialData };
-}
-
-async function 建立传输管道(ws, tcp, init) {
-  ws.send(new Uint8Array([0, 0]));
-  const writer = tcp.writable.getWriter();
-  const reader = tcp.readable.getReader();
-  if (init) await writer.write(init);
-
-  ws.addEventListener('message', e => writer.write(e.data));
-
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (value) {
-        // 分段发送：切片大小每次随机 1~1024 字节
-        let offset = 0;
-        while (offset < value.length) {
-          const randomSize = 1 + Math.floor(Math.random() * 1024);
-          const chunkSize = Math.min(randomSize, value.length - offset);
-          const chunk = value.slice(offset, offset + chunkSize);
-          ws.send(chunk);
-          offset += chunkSize;
-        }
-      }
-    }
-  } finally {
-    try { ws.close(); } catch {}
-    try { reader.cancel(); } catch {}
-    try { writer.releaseLock(); } catch {}
-    tcp.close();
-  }
-}
-
-function 验证VL的密钥(a) {
-  const hex = Array.from(a, v => v.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
-}
-
-function 给我订阅页面(ID, host) {
-  return `
-1、本worker的私钥功能只支持通用订阅，其他请关闭私钥功能  
-2、其他需求自行研究  
-通用的：https${符号}${host}/${ID}/${转码}${转码2}
-`;
-}
-
-function 给我通用配置文件(host) {
-  我的优选.push(`${host}:443#备用节点`);
-  if (私钥开关) return '请先关闭私钥功能';
-
-  return 我的优选.map(item => {
-    const [main, tls] = item.split("@");
-    const [addrPort, name = 我的节点名字] = main.split("#");
-    const parts = addrPort.split(":");
-    const port = parts.length > 1 ? Number(parts.pop()) : 443;
-    const addr = parts.join(":");
-    const tlsOpt = tls === 'notls' ? 'security=none' : 'security=tls';
-    return `${转码}${转码2}${符号}${哎呀呀这是我的VL密钥}@${addr}:${port}?encryption=none&${tlsOpt}&sni=${host}&type=ws&host=${host}&path=%2F%3Fed%3D2560#${name}`;
-  }).join("\n");
-}
