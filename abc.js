@@ -1,3 +1,4 @@
+
 let NAT64 = true; // ← 改名：默认开启 
 
 let 我的节点名字 = '天书暴躁版';
@@ -133,3 +134,35 @@ async function 解析VL标头(buf) {
     offset += 16;
   }
   const initialData = buf.slice(offset);
+
+  /* --------- 1. 直连 --------- */
+  try {
+    const tcpSocket = await connect({ hostname: host, port });
+    await tcpSocket.opened;
+    return { tcpSocket, initialData };
+  } catch { /* ignore */ }
+
+  /* --------- 2. NAT64 --------- */
+  if (NAT64) {
+    try {
+      let natTarget;
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) {
+        natTarget = convertToNAT64IPv6(host);
+      } else if (host.includes(':')) {
+        throw new Error('IPv6 地址无需 NAT64');
+      } else {
+        natTarget = await getIPv6ProxyAddress(host);
+      }
+      const natSock = await connect({ hostname: natTarget.replace(/^|$/g, ''), port });
+      await natSock.opened;
+      return { tcpSocket: natSock, initialData };
+    } catch { /* ignore */ }
+  }
+
+  /* --------- 3. 反代兜底 --------- */
+  if (!启用反代功能 || !反代IP) throw Error('连接失败');
+  const [h, p] = 反代IP.split(':');
+  const tcpSocket = await connect({ hostname: h, port: Number(p) || port });
+  await tcpSocket.opened;
+  return { tcpSocket, initialData };
+}
