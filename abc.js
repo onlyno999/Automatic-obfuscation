@@ -1,76 +1,78 @@
 // ====================================================================
-// Cloudflare Worker: VL over WebSocket + SOCKS5 (带并发SOCKS5代理选择)
+// 云端响马工头：飞来石客栈的暗号 + SOCKS5 (带同伙SOCKS5代理的选择权)
 // --------------------------------------------------------------------
 
-// 环境变量 (Vars) 说明：
-//   UUID        必填，VL 用户的 UUID
-//   ID          可选，订阅路径 (默认 123456)
-//   SOCKS5_ADDRESS	可选 user:pass@127.0.0.1:1080 作为 SOCKS5_TXT_URL 加载失败时的备用
-//   SOCKS5_TXT_URL 可选 例如：https://example.com/socks5_list.txt
-//   SOCKS5_CONNECT_TIMEOUT = 5000; // SOCKS5 连接超时 (毫秒) 可选，SOCKS5 地址列表 TXT 文件的 URL
-//   SOCKS5_ENABLE 可选，true|false，true启用SOCKS5反代，false不启用 (默认 true)
-//   SOCKS5_GLOBAL 可选，true|false，true启用SOCKS5全局反代，false仅在直连失败时尝试 (默认 true)
-//   隐藏        可选，true|false，true 时订阅接口只返回嘲讽语.
-//   私钥        可选，用于 WS 连接认证的私钥
-//   私钥开关    可选，true|false，是否启用私钥认证
-//   嘲讽语      可选，隐藏订阅时返回的嘲讽语
+// 云端工头暗号本 (环境变量) 记事：
+//   大当家    必填，飞来石客栈客人的暗号
+//   二当家    可选，接头路径 (默认 123456)
+//   探子窝点  可选，老窝地址 user:pass@127.0.0.1:1080，探子名单失效时用
+//   探子名单  可选，暗桩窝点的名单，例如：https://example.com/socks5_list.txt
+//   探子限时  = 5000; // 探子接头时间 (毫秒)，可选
+//   探子启用  可选，true|false，true用探子反向接头，false直连 (默认 true)
+//   探子全员  可选，true|false，true全员用探子，false只在直连失败时用 (默认 true)
+//   藏宝图    可选，true|false，true时接头只给一句黑话
+//   秘密信物  可选，用于接头暗号的私密信物
+//   信物开关  可选，true|false，是否启用私密信物认证
+//   黑话      可选，藏宝图时返回的黑话
 //
 // ====================================================================
 
 import { connect } from 'cloudflare:sockets';
 
-let 转码 = 'vl', 转码2 = 'ess', 符号 = '://';
+const 客栈暗号 = 'vl';
+const 接头后缀 = 'ess';
+const 接头口令 = '://';
 
-//////////////////////////////////////////////////////////////////////////配置区块////////////////////////////////////////////////////////////////////////
-let 哎呀呀这是我的ID啊 = "123456"; // 订阅路径
-let 哎呀呀这是我的VL密钥 = "25dce6e6-1c37-4e8c-806b-5ef8affd9f55"; // UUID
+//////////////////////////////////////////////////////////////////////////匪帮据点规矩////////////////////////////////////////////////////////////////////////
+let 匪帮路径 = "123456";
+let 匪帮暗号 = "25dce6e6-1c37-4e8c-806b-5ef8affd9f55";
 
-let 私钥开关 = false;
-let 咦这是我的私钥哎 = "";
+let 启用信物 = false;
+let 秘密信物 = "";
 
-let 隐藏订阅 = false; // 开启 true ━ 关闭false
-let 嘲讽语 = "哎呀你找到了我，但是我就是不给你看，气不气，嘿嘿嘿";
+let 藏宝图 = false;
+let 黑话 = "哎呀你找到了我，但是我就是不给你看，气不气，嘿嘿嘿";
 
-let 我的优选 = ['cloudflare-ddns.zone.id:443#美国 域名 默认值 — Cloudflare CDN 节点']; // 可通过环境变量 IP 配置，也可以通过 TXT 配置
-let 我的优选TXT = ['']; // 可通过环境变量 TXT 配置，用于从远程文件加载优选 IP
+let 优选据点们 = ['cloudflare-ddns.zone.id:443#北美匪帮大寨'];
+let 优选据点名单 = [''];
 
-let 我的节点名字 = 'SOCKS5版';
+let 我家寨名 = 'SOCKS5版';
 
-// 新增SOCKS5相关配置
-let 启用SOCKS5反代 = true; // 选择是否启用SOCKS5反代功能，true启用，false不启用，可以通过环境变量SOCKS5_ENABLE控制
-let 启用SOCKS5全局反代 = true; // 选择是否启用SOCKS5全局反代，启用后所有访问都是S5的落地，可以通过环境变量SOCKS5_GLOBAL控制
-let 我的SOCKS5账号 = ''; // 格式'账号:密码@地址:端口'，可以通过环境变量SOCKS5_ADDRESS控制
+// 探子窝点规矩
+let 启用探子窝点 = true;
+let 探子窝点全员 = true;
+let 备用探子窝点 = '';
 
-// 新增：SOCKS5 地址列表 URL
-let SOCKS5地址列表URL = ''; // 可以通过环境变量 SOCKS5_TXT_URL 控制
+// 新规矩：探子窝点名单
+let 探子窝点名单 = '';
 
-// SOCKS5 地址池和当前索引 (在并发模式下，索引更多用于初始加载后的顺序，实际连接由 Promise.any 管理)
-let SOCKS5地址池 = [];
-let SOCKS5地址列表上次更新时间 = 0;
-const SOCKS5地址列表刷新间隔 = 5 * 60 * 1000; // 5分钟刷新一次 (毫秒)
-const SOCKS5_CONNECT_TIMEOUT = 5000; // SOCKS5 连接超时 (毫秒)
+// 探子窝点和上次更新时间
+let 探子窝点池 = [];
+let 探子上次更新 = 0;
+const 探子刷新时辰 = 5 * 60 * 1000; // 5 分钟 (毫秒)
+const 探子接头限时 = 5000; // 探子接头超时 (毫秒)
 
-let DOH服务器列表 = [ //DOH地址，基本上已经涵盖市面上所有通用地址了，一般无需修改
+const 探子联络点 = [
   "https://dns.google/dns-query",
   "https://cloudflare-dns.com/dns-query",
   "https://1.1.1.1/dns-query",
   "https://dns.quad9.net/dns-query",
 ];
 
-// --- 新增：伪装页面相关的变量和函数 ---
-let disguiseUrl = 'https://cf-worker-dir-bke.pages.dev/'; // 添加伪装页面的URL
+// --- 新规矩：乔装打扮和窝点页面 ---
+const 乔装窝点 = 'https://cf-worker-dir-bke.pages.dev/';
 
-async function serveDisguisePage() {
+async function 扮作寻常人家() {
   try {
-    const res = await fetch(disguiseUrl, { cf: { cacheEverything: true } });
+    const res = await fetch(乔装窝点, { cf: { cacheEverything: true } });
     return new Response(res.body, res);
   } catch {
     return new Response(
       `<!DOCTYPE html>
        <html>
-         <head><title>Welcome</title></head>
-         <body><h1>Cloudflare Worker 已部署成功</h1>
-         <p>此页面为静态伪装页面（远程加载失败）。</p></body>
+         <head><title>欢迎光临</title></head>
+         <body><h1>云端响马工头已在此安寨</h1>
+         <p>此页面为静态伪装页面（联络失败）。</p></body>
        </html>`,
       {
         status: 200,
@@ -79,549 +81,516 @@ async function serveDisguisePage() {
     );
   }
 }
-// --- 结束新增 ---
+// --- 规矩结束 ---
 
-const 读取环境变量 = (name, fallback, env) => {
-  const raw = import.meta?.env?.[name] ?? env?.[name];
-  if (raw === undefined || raw === null || raw === '') return fallback;
-  if (typeof raw === 'string') {
-    const trimmed = raw.trim();
-    if (trimmed === 'true') return true;
-    if (trimmed === 'false') return false;
-    if (trimmed.includes('\n')) {
-      return trimmed.split('\n').map(item => item.trim()).filter(Boolean);
+const 摸清环境变量 = (名字, 替补, 巢穴) => {
+  const 原始值 = import.meta?.env?.[名字] ?? 巢穴?.[名字];
+  if (原始值 === undefined || 原始值 === null || 原始值 === '') return 替补;
+  if (typeof 原始值 === 'string') {
+    const 修剪值 = 原始值.trim();
+    if (修剪值 === 'true') return true;
+    if (修剪值 === 'false') return false;
+    if (修剪值.includes('\n')) {
+      return 修剪值.split('\n').map(item => item.trim()).filter(Boolean);
     }
-    if (!isNaN(trimmed) && trimmed !== '') return Number(trimmed);
-    return trimmed;
+    if (!isNaN(修剪值) && 修剪值 !== '') return Number(修剪值);
+    return 修剪值;
   }
-  return raw;
+  return 原始值;
 };
 
-// 新增：加载 SOCKS5 地址列表的函数
-async function 加载SOCKS5地址列表() {
-  if (!SOCKS5地址列表URL) {
-    console.log('SOCKS5_TXT_URL 未配置，不加载 SOCKS5 地址列表。');
+// 新规矩：加载探子窝点名单
+async function 加载探子窝点名单() {
+  if (!探子窝点名单) {
+    console.log('探子名单未配置，跳过加载。');
     return;
   }
 
-  const currentTime = Date.now();
-  if (currentTime - SOCKS5地址列表上次更新时间 < SOCKS5地址列表刷新间隔 && SOCKS5地址池.length > 0) {
-    // 还没到刷新时间，且地址池不为空，则不刷新
+  const 当前时辰 = Date.now();
+  if (当前时辰 - 探子上次更新 < 探子刷新时辰 && 探子窝点池.length > 0) {
     return;
   }
 
-  console.log('正在加载 SOCKS5 地址列表...');
+  console.log('正在加载探子名单...');
   try {
-    const response = await fetch(SOCKS5地址列表URL);
+    const response = await fetch(探子窝点名单);
     if (!response.ok) {
-      throw new Error(`无法加载 SOCKS5 地址列表: ${response.statusText} (Status: ${response.status})`);
+      throw new Error(`加载探子名单失败: ${response.statusText} (状态: ${response.status})`);
     }
     const text = await response.text();
-    // 过滤空行、只含空格的行和以 # 开头的注释行
-    const addresses = text.split('\n')
+    const 地址们 = text.split('\n')
                            .map(line => line.trim())
                            .filter(line => line && !line.startsWith('#'));
 
-    if (addresses.length > 0) {
-      SOCKS5地址池 = addresses;
-      SOCKS5地址列表上次更新时间 = currentTime;
-      console.log(`成功加载 ${SOCKS5地址池.length} 个 SOCKS5 地址。`);
+    if (地址们.length > 0) {
+      探子窝点池 = 地址们;
+      探子上次更新 = 当前时辰;
+      console.log(`成功加载 ${探子窝点池.length} 个探子窝点。`);
     } else {
-      console.warn('SOCKS5 地址列表文件为空或不含有效地址。将保留上次成功的列表（如果存在）。');
-      // 如果文件内容为空，不清空当前的 SOCKS5地址池，保留上次成功的
+      console.warn('探子名单文件为空或无有效窝点。保留上次成功的名单。');
     }
   } catch (e) {
-    console.error(`加载 SOCKS5 地址列表失败: ${e.message}。将使用备用 SOCKS5_ADDRESS (如果已配置) 或上次成功加载的列表。`);
-    // 即使加载失败，也保留旧的地址池，或者在地址池为空时，尝试 fallback 到 SOCKS5_ADDRESS
+    console.error(`加载探子名单失败: ${e.message}。将使用备用窝点（如已配置）或上次的成功名单。`);
   }
 }
 
 export default {
-  async fetch(访问请求, env) {
-    // 读取配置区块中的环境变量
-    哎呀呀这是我的ID啊 = 读取环境变量('ID', 哎呀呀这是我的ID啊, env);
-    哎呀呀这是我的VL密钥 = 读取环境变量('UUID', 哎呀呀这是我的VL密钥, env);
-    我的优选 = 读取环境变量('IP', 我的优选, env);
-    我的优选TXT = 读取环境变量('TXT', 我的优选TXT, env);
-    咦这是我的私钥哎 = 读取环境变量('私钥', 咦这是我的私钥哎, env);
-    隐藏订阅 = 读取环境变量('隐藏', 隐藏订阅, env);
-    私钥开关 = 读取环境变量('私钥开关', 私钥开关, env);
-    嘲讽语 = 读取环境变量('嘲讽语', 嘲讽语, env);
-    我的节点名字 = 读取环境变量('我的节点名字', 我的节点名字, env);
+  async fetch(request, env) {
+    // 摸清环境变量
+    匪帮路径 = 摸清环境变量('ID', 匪帮路径, env);
+    匪帮暗号 = 摸清环境变量('UUID', 匪帮暗号, env);
+    优选据点们 = 摸清环境变量('IP', 优选据点们, env);
+    优选据点名单 = 摸清环境变量('TXT', 优选据点名单, env);
+    秘密信物 = 摸清环境变量('私钥', 秘密信物, env);
+    藏宝图 = 摸清环境变量('隐藏', 藏宝图, env);
+    启用信物 = 摸清环境变量('私钥开关', 启用信物, env);
+    黑话 = 摸清环境变量('嘲讽语', 黑话, env);
+    我家寨名 = 摸清环境变量('我的节点名字', 我家寨名, env);
 
-    // 读取SOCKS5相关的环境变量
-    启用SOCKS5反代 = 读取环境变量('SOCKS5_ENABLE', 启用SOCKS5反代, env);
-    启用SOCKS5全局反代 = 读取环境变量('SOCKS5_GLOBAL', 启用SOCKS5全局反代, env);
-    我的SOCKS5账号 = 读取环境变量('SOCKS5_ADDRESS', 我的SOCKS5账号, env);
-    SOCKS5地址列表URL = 读取环境变量('SOCKS5_TXT_URL', SOCKS5地址列表URL, env); // 读取新的环境变量
+    // 摸清探子窝点环境变量
+    启用探子窝点 = 摸清环境变量('SOCKS5_ENABLE', 启用探子窝点, env);
+    探子窝点全员 = 摸清环境变量('SOCKS5_GLOBAL', 探子窝点全员, env);
+    备用探子窝点 = 摸清环境变量('SOCKS5_ADDRESS', 备用探子窝点, env);
+    探子窝点名单 = 摸清环境变量('SOCKS5_TXT_URL', 探子窝点名单, env);
 
-    // 尝试加载 SOCKS5 地址列表
-    await 加载SOCKS5地址列表();
+    await 加载探子窝点名单();
 
-    const 升级标头 = 访问请求.headers.get('Upgrade');
-    const url = new URL(访问请求.url);
+    const 升级暗号 = request.headers.get('Upgrade');
+    const url = new URL(request.url);
 
-    if (!升级标头 || 升级标头 !== 'websocket') {
-      // 非 WebSocket 请求处理 (订阅、Hello World)
-      if (我的优选TXT) {
-        const 链接数组 = Array.isArray(我的优选TXT) ? 我的优选TXT : [我的优选TXT];
-        const 所有节点 = [];
-        for (const 链接 of 链接数组) {
+    if (!升级暗号 || 升级暗号 !== 'websocket') {
+      // 没对上暗号，处理寻常路人
+      if (优选据点名单) {
+        const urlArray = Array.isArray(优选据点名单) ? 优选据点名单 : [优选据点名单];
+        const 所有据点 = [];
+        for (const link of urlArray) {
           try {
-            const 响应 = await fetch(链接);
-            const 文本 = await 响应.text();
-            const 节点 = 文本.split('\n').map(line => line.trim()).filter(line => line);
-            所有节点.push(...节点);
+            const response = await fetch(link);
+            const text = await response.text();
+            const 据点们 = text.split('\n').map(line => line.trim()).filter(line => line);
+            所有据点.push(...据点们);
           } catch (e) {
-            console.warn(`无法获取或解析优选链接: ${链接}`, e);
+            console.warn(`从名单联络据点失败: ${link}`, e);
           }
         }
-        if (所有节点.length > 0) 我的优选 = 所有节点;
+        if (所有据点.length > 0) 优选据点们 = 所有据点;
       }
       switch (url.pathname) {
-        case '/': // 处理伪装页面
-          return serveDisguisePage(); // 返回伪装页面
-        case `/${哎呀呀这是我的ID啊}`: {
-          const sub = 给我订阅页面(哎呀呀这是我的ID啊, 访问请求.headers.get('Host'));
+        case '/':
+          return 扮作寻常人家();
+        case `/${匪帮路径}`: {
+          const sub = 生成订阅页面(匪帮路径, request.headers.get('Host'));
           return new Response(sub, {
             status: 200,
             headers: { "Content-Type": "text/plain;charset=utf-8" }
           });
         }
-        case `/${哎呀呀这是我的ID啊}/${转码}${转码2}`: {
-          if (隐藏订阅) {
-            return new Response(嘲讽语, {
+        case `/${匪帮路径}/${客栈暗号}${接头后缀}`: {
+          if (藏宝图) {
+            return new Response(黑话, {
               status: 200,
               headers: { "Content-Type": "text/plain;charset=utf-8" }
             });
           } else {
-            const cfg = 给我通用配置文件(访问请求.headers.get('Host'));
-            return new Response(cfg, {
+            const config = 生成配置文件(request.headers.get('Host'));
+            return new Response(config, {
               status: 200,
               headers: { "Content-Type": "text/plain;charset=utf-8" }
             });
           }
         }
         default:
-          return new Response('Hello World!', { status: 200 }); // 或其他默认响应
+          return new Response('来者何人!', { status: 200 });
       }
     } else {
-      // WebSocket 升级请求处理
-      if (私钥开关) {
-        const k = 访问请求.headers.get('my-key');
-        if (k !== 咦这是我的私钥哎) return new Response('私钥验证失败', { status: 403 });
+      // 对上暗号，处理接头人
+      if (启用信物) {
+        const k = request.headers.get('my-key');
+        if (k !== 秘密信物) return new Response('信物不对，杀！', { status: 403 });
       }
-      const enc = 访问请求.headers.get('sec-websocket-protocol');
-      const data = 使用64位加解密(enc);
-      if (!私钥开关 && 验证VL的密钥(new Uint8Array(data.slice(1, 17))) !== 哎呀呀这是我的VL密钥) {
-        return new Response('无效的UUID', { status: 403 });
+      const 编码 = request.headers.get('sec-websocket-protocol');
+      const 数据 = 解码天书(编码);
+      if (!启用信物 && 获取匪帮暗号(new Uint8Array(数据.slice(1, 17))) !== 匪帮暗号) {
+        return new Response('暗号不对', { status: 403 });
       }
       try {
-        const { tcpSocket, initialData } = await 解析VL标头(data);
-        return await 升级WS请求(访问请求, tcpSocket, initialData);
+        const { tcpSocket, 初始数据 } = await 解析匪帮暗号(数据);
+        return await 处理接头升级(request, tcpSocket, 初始数据);
       } catch (e) {
-        console.error("VL 协议解析或 TCP 连接失败:", e);
-        return new Response(`Bad Gateway: ${e.message}`, { status: 502 });
+        console.error("匪帮暗号解析或接头失败:", e);
+        return new Response(`接头失败: ${e.message}`, { status: 502 });
       }
     }
   }
 };
 
-async function 升级WS请求(访问请求, tcpSocket, initialData) {
-  const { 0: 客户端, 1: WS接口 } = new WebSocketPair();
-  WS接口.accept();
-  建立传输管道(WS接口, tcpSocket, initialData);
-  return new Response(null, { status: 101, webSocket: 客户端 });
+async function 处理接头升级(请求, 接头暗号, 初始数据) {
+  const { 0: 寻常路人, 1: 接头人 } = new WebSocketPair();
+  接头人.accept();
+  接通水管(接头人, 接头暗号, 初始数据);
+  return new Response(null, { status: 101, webSocket: 寻常路人 });
 }
 
-function 使用64位加解密(str) {
-  str = str.replace(/-/g, '+').replace(/_/g, '/');
-  return Uint8Array.from(atob(str), c => c.charCodeAt(0)).buffer;
+function 解码天书(天书) {
+  天书 = 天书.replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(天书), c => c.charCodeAt(0)).buffer;
 }
 
-async function 解析VL标头(buf) {
-  const b = new DataView(buf), c = new Uint8Array(buf);
-  const 获取数据定位 = c[17];
-  const 提取端口索引 = 18 + 获取数据定位 + 1;
-  const 访问端口 = b.getUint16(提取端口索引);
-  if (访问端口 === 53) throw new Error('拒绝DNS连接') // 避免直接DNS连接
-  const 提取地址索引 = 提取端口索引 + 2;
-  let 识别地址类型 = c[提取地址索引];
-  let 地址信息索引 = 提取地址索引 + 1;
-  let 访问地址;
+async function 解析匪帮暗号(缓存) {
+  const 数据视图 = new DataView(缓存), 字节数组 = new Uint8Array(缓存);
+  const 数据位置 = 字节数组[17];
+  const 端口位置 = 18 + 数据位置 + 1;
+  const 目标端口 = 数据视图.getUint16(端口位置);
+  if (目标端口 === 53) throw new Error('拒绝DNS联络');
+  const 地址位置 = 端口位置 + 2;
+  let 地址类型 = 字节数组[地址位置];
+  let 地址信息位置 = 地址位置 + 1;
+  let 目标地址;
   let 地址长度;
 
-  switch (识别地址类型) {
+  switch (地址类型) {
     case 1: // IPv4
       地址长度 = 4;
-      访问地址 = Array.from(c.slice(地址信息索引, 地址信息索引 + 地址长度)).join('.');
+      目标地址 = Array.from(字节数组.slice(地址信息位置, 地址信息位置 + 地址长度)).join('.');
       break;
     case 2: // 域名
-      地址长度 = c[地址信息索引];
-      地址信息索引 += 1;
-      const 访问域名 = new TextDecoder().decode(c.slice(地址信息索引, 地址信息索引 + 地址长度));
-      访问地址 = await 查询最快IP(访问域名); // 使用DOH查询IP
-      if (访问地址 !== 访问域名) {
-        // 更新地址类型，因为 DOH 可能将域名解析为 IPv6
-        识别地址类型 = 访问地址.includes(':') ? 3 : 1;
+      地址长度 = 字节数组[地址信息位置];
+      地址信息位置 += 1;
+      const 域名 = new TextDecoder().decode(字节数组.slice(地址信息位置, 地址信息位置 + 地址长度));
+      目标地址 = await 找到最快的窝点(域名);
+      if (目标地址 !== 域名) {
+        地址类型 = 目标地址.includes(':') ? 3 : 1;
       }
       break;
     case 3: // IPv6
       地址长度 = 16;
       const ipv6 = [];
-      const 读取IPV6地址 = new DataView(buf, 地址信息索引, 16);
-      for (let i = 0; i < 8; i++) ipv6.push(读取IPV6地址.getUint16(i * 2).toString(16));
-      访问地址 = ipv6.join(':');
+      const ipv6视图 = new DataView(缓存, 地址信息位置, 16);
+      for (let i = 0; i < 8; i++) ipv6.push(ipv6视图.getUint16(i * 2).toString(16));
+      目标地址 = ipv6.join(':');
       break;
     default:
-      throw new Error ('无效的访问地址类型');
+      throw new Error('无效的目标地址类型');
   }
 
-  const initialData = buf.slice(地址信息索引 + 地址长度);
-  let tcpSocket;
+  const 初始数据 = 缓存.slice(地址信息位置 + 地址长度);
+  let 接头暗号;
 
-  // SOCKS5 逻辑集成
-  if (启用SOCKS5反代) { // 检查是否启用 SOCKS5 反代
-    if (启用SOCKS5全局反代) { // 全局SOCKS5反代
-      tcpSocket = await 尝试创建SOCKS5接口(识别地址类型, 访问地址, 访问端口);
-    } else { // 非全局SOCKS5反代，仅当直连失败时尝试SOCKS5
+  if (启用探子窝点) {
+    if (探子窝点全员) {
+      接头暗号 = await 建立探子接头(地址类型, 目标地址, 目标端口);
+    } else {
       try {
-        tcpSocket = connect({ hostname: 访问地址, port: 访问端口 });
-        await tcpSocket.opened;
+        接头暗号 = connect({ hostname: 目标地址, port: 目标端口 });
+        await 接头暗号.opened;
       } catch (e) {
-        console.warn(`直接连接目标 ${访问地址}:${访问端口} 失败，尝试通过SOCKS5代理: ${e.message}`);
-        tcpSocket = await 尝试创建SOCKS5接口(识别地址类型, 访问地址, 访问端口);
+        console.warn(`直连 ${目标地址}:${目标端口} 失败，尝试探子接头: ${e.message}`);
+        接头暗号 = await 建立探子接头(地址类型, 目标地址, 目标端口);
       }
     }
-  } else { // 不启用SOCKS5反代，直接连接
-    tcpSocket = connect({ hostname: 访问地址, port: 访问端口 });
+  } else {
+    接头暗号 = connect({ hostname: 目标地址, port: 目标端口 });
   }
 
-  // 确保 socket 已打开，否则会抛出错误
-  await tcpSocket.opened;
-  return { tcpSocket, initialData };
+  await 接头暗号.opened;
+  return { tcpSocket: 接头暗号, 初始数据 };
 }
 
-// 改进：尝试创建SOCKS5接口（并发模式，哪个快用哪个，自动跳过失败）
-async function 尝试创建SOCKS5接口(识别地址类型, 目标地址, 目标端口) {
-  let proxiesToTry = [];
+async function 建立探子接头(地址类型, 目标地址, 目标端口) {
+  let 要试的探子们 = [];
 
-  // 首先，尝试从 SOCKS5地址池 获取代理
-  if (SOCKS5地址池.length > 0) {
-    proxiesToTry = [...SOCKS5地址池]; // 复制一份，避免修改原数组
+  if (探子窝点池.length > 0) {
+    要试的探子们 = [...探子窝点池];
   }
 
-  // 如果 SOCKS5地址池 为空，但 我的SOCKS5账号 配置了，则将其作为备用
-  if (proxiesToTry.length === 0 && 我的SOCKS5账号) {
-    proxiesToTry.push(我的SOCKS5账号);
+  if (要试的探子们.length === 0 && 备用探子窝点) {
+    要试的探子们.push(备用探子窝点);
   }
 
-  if (proxiesToTry.length === 0) {
-    throw new Error('未配置任何 SOCKS5 代理地址 (SOCKS5_TXT_URL 或 SOCKS5_ADDRESS)。');
+  if (要试的探子们.length === 0) {
+    throw new Error('没有配置探子窝点 (探子名单或探子窝点)。');
   }
 
-  const connectionPromises = proxiesToTry.map(async (proxyConfig, index) => {
-    let tcpSocket = null;
+  const 接头承诺们 = 要试的探子们.map(async (窝点配置, 索引) => {
+    let 接头暗号 = null;
     try {
-      const { 账号, 密码, 地址, 端口 } = await 获取SOCKS5账号(proxyConfig);
-      console.log(`正在并发尝试连接 SOCKS5 代理: ${账号 ? '带认证' : '无认证'} ${地址}:${端口} (代理 ${index + 1}/${proxiesToTry.length})`);
+      const { 匪号, 密码, 窝点, 端口 } = 解析探子地址(窝点配置);
+      console.log(`正在尝试与探子接头: ${匪号 ? '带暗号' : '不带暗号'} ${窝点}:${端口} (探子 ${索引 + 1}/${要试的探子们.length})`);
 
-      // 创建一个带超时的 Promise
-      const timeoutPromise = new Promise((resolve, reject) => {
+      const 超时承诺 = new Promise((resolve, reject) => {
         const id = setTimeout(() => {
-          reject(new Error(`连接超时: ${地址}:${端口}`));
-        }, SOCKS5_CONNECT_TIMEOUT); // 使用配置的超时时间
+          reject(new Error(`接头超时: ${窝点}:${端口}`));
+        }, 探子接头限时);
       });
 
-      // 竞速连接尝试和超时
-      tcpSocket = await Promise.race([
-        创建SOCKS5接口连接(账号, 密码, 地址, 端口, 识别地址类型, 目标地址, 目标端口),
-        timeoutPromise
+      接头暗号 = await Promise.race([
+        实现探子接头(匪号, 密码, 窝点, 端口, 地址类型, 目标地址, 目标端口),
+        超时承诺
       ]);
 
-      console.log(`成功连接 SOCKS5 代理: ${地址}:${端口}`);
-      return { socket: tcpSocket, config: proxyConfig }; // 返回成功连接的 socket
+      console.log(`成功与探子接头: ${窝点}:${端口}`);
+      return { socket: 接头暗号, config: 窝点配置 };
     } catch (e) {
-      console.warn(`SOCKS5 代理连接失败或超时 (${proxyConfig}): ${e.message}`);
-      if (tcpSocket) {
-        try { tcpSocket.close(); } catch (closeErr) { console.warn("关闭失败连接时出错:", closeErr); }
+      console.warn(`探子接头失败或超时 (${窝点配置}): ${e.message}`);
+      if (接头暗号) {
+        try { 接头暗号.close(); } catch (关闭错误) { console.warn("关闭失败的接头出错:", 关闭错误); }
       }
-      return Promise.reject(new Error(`代理失败: ${proxyConfig} - ${e.message}`)); // 标记为拒绝，让 Promise.any 处理
+      return Promise.reject(new Error(`探子失败: ${窝点配置} - ${e.message}`));
     }
   });
 
   try {
-    const { socket, config } = await Promise.any(connectionPromises);
-    // 当 Promise.any 成功时，意味着至少一个代理连接成功
-    // 此时，Promise.any 会自动处理其他仍在进行的 Promise，不成功的会被抛弃
+    const { socket } = await Promise.any(接头承诺们);
     return socket;
-  } catch (aggregateError) {
-    // Promise.any 抛出 AggregateError，如果所有 Promise 都失败了
-    console.error(`所有 SOCKS5 代理尝试均失败:`, aggregateError.errors.map(e => e.message).join('; '));
-    throw new Error('所有 SOCKS5 代理尝试均失败。');
+  } catch (总错误) {
+    console.error(`所有探子接头都失败了:`, 总错误.errors.map(e => e.message).join('; '));
+    throw new Error('所有探子接头都失败了。');
   }
 }
 
-// 提取创建SOCKS5接口的核心逻辑到单独函数，方便复用
-async function 创建SOCKS5接口连接(账号, 密码, S5地址, S5端口, 识别地址类型, 访问地址, 访问端口) {
-  const SOCKS5接口 = connect({ hostname: S5地址, port: S5端口 });
-  let 传输数据, 读取数据;
+async function 实现探子接头(匪号, 密码, 窝点, 端口, 地址类型, 目标地址, 目标端口) {
+  const 探子窝点 = connect({ hostname: 窝点, port: 端口 });
+  let 写入器, 读取器;
   try {
-    await SOCKS5接口.opened;
-    传输数据 = SOCKS5接口.writable.getWriter();
-    读取数据 = SOCKS5接口.readable.getReader();
-    const 转换数组 = new TextEncoder();
+    await 探子窝点.opened;
+    写入器 = 探子窝点.writable.getWriter();
+    读取器 = 探子窝点.readable.getReader();
+    const 编码器 = new TextEncoder();
 
-    // SOCKS5 认证协商
-    // Support no authentication (0x00) and username/password (0x02)
-    const 构建S5认证 = new Uint8Array([5, 2, 0, 2]);
-    await 传输数据.write(构建S5认证);
-    const 读取认证要求 = (await 读取数据.read()).value;
+    // SOCKS5 匪帮规矩
+    const 规矩们 = new Uint8Array([5, 2, 0, 2]);
+    await 写入器.write(规矩们);
+    const 规矩回应 = (await 读取器.read()).value;
 
-    if (!读取认证要求 || 读取认证要求.length < 2) {
-      throw new Error('SOCKS5 认证协商响应无效。');
+    if (!规矩回应 || 规矩回应.length < 2) {
+      throw new Error('SOCKS5 匪帮规矩回应不对。');
     }
 
-    if (读取认证要求[1] === 0x02) { // Username/Password authentication required
-      if (!账号 || !密码) {
-        throw new Error (`SOCKS5 代理需要认证，但未配置账号密码。`);
+    if (规矩回应[1] === 0x02) {
+      if (!匪号 || !密码) {
+        throw new Error(`探子窝点需要暗号，但没配置。`);
       }
-      const 构建账号密码包 = new Uint8Array([ 1, 账号.length, ...转换数组.encode(账号), 密码.length, ...转换数组.encode(密码) ]);
-      await 传输数据.write(构建账号密码包);
-      const 读取账号密码认证结果 = (await 读取数据.read()).value;
-      if (!读取账号密码认证结果 || 读取账号密码认证结果.length < 2 || 读取账号密码认证结果[0] !== 0x01 || 读取账号密码认证结果[1] !== 0x00) {
-        throw new Error (`SOCKS5 账号密码错误或认证失败。`);
+      const 认证包裹 = new Uint8Array([1, 匪号.length, ...编码器.encode(匪号), 密码.length, ...编码器.encode(密码)]);
+      await 写入器.write(认证包裹);
+      const 认证结果 = (await 读取器.read()).value;
+      if (!认证结果 || 认证结果.length < 2 || 认证结果[0] !== 0x01 || 认证结果[1] !== 0x00) {
+        throw new Error(`SOCKS5 匪号/密码不对或认证失败。`);
       }
-    } else if (读取认证要求[1] === 0x00) { // No authentication required
-        // Do nothing, proceed to connection
+    } else if (规矩回应[1] === 0x00) {
+      // 不需要暗号
     } else {
-        throw new Error (`SOCKS5 认证方式不支持: ${读取认证要求[1]}`);
+      throw new Error(`不支持的 SOCKS5 匪帮规矩: ${规矩回应[1]}`);
     }
 
-    // SOCKS5 连接目标
-    let 转换访问地址;
-    switch (识别地址类型) {
+    // SOCKS5 接头
+    let 目标地址字节们;
+    switch (地址类型) {
       case 1: // IPv4
-        转换访问地址 = new Uint8Array( [1, ...访问地址.split('.').map(Number)] );
+        目标地址字节们 = new Uint8Array([1, ...目标地址.split('.').map(Number)]);
         break;
       case 2: // 域名
-        转换访问地址 = new Uint8Array( [3, 访问地址.length, ...转换数组.encode(访问地址)] );
+        目标地址字节们 = new Uint8Array([3, 目标地址.length, ...编码器.encode(目标地址)]);
         break;
       case 3: // IPv6
-        const ipv6Parts = 访问地址.split(':');
-        const ipv6Bytes = [];
-        let doubleColonHandled = false;
-        for (let i = 0; i < ipv6Parts.length; i++) {
-          let part = ipv6Parts[i];
-          if (part === '') { // Handle ::
-            if (!doubleColonHandled) {
-              let numMissingParts = 8 - (ipv6Parts.length - 1);
-              if (ipv6Parts[0] === '' && i === 0) numMissingParts++; // e.g. ::1
-              if (ipv6Parts[ipv6Parts.length - 1] === '' && i === ipv6Parts.length - 1) numMissingParts++; // e.g. 1::
-
-              for (let j = 0; j < numMissingParts; j++) {
-                ipv6Bytes.push(0x00, 0x00);
+        const ipv6部分 = 目标地址.split(':');
+        const ipv6字节们 = [];
+        let 双冒号已处理 = false;
+        for (let i = 0; i < ipv6部分.length; i++) {
+          let part = ipv6部分[i];
+          if (part === '') {
+            if (!双冒号已处理) {
+              let 缺失部分 = 8 - (ipv6部分.length - 1);
+              if (ipv6部分[0] === '' && i === 0) 缺失部分++;
+              if (ipv6部分[ipv6部分.length - 1] === '' && i === ipv6部分.length - 1) 缺失部分++;
+              for (let j = 0; j < 缺失部分; j++) {
+                ipv6字节们.push(0x00, 0x00);
               }
-              doubleColonHandled = true;
+              双冒号已处理 = true;
             }
           } else {
             let val = parseInt(part, 16);
-            ipv6Bytes.push((val >> 8) & 0xFF, val & 0xFF);
+            ipv6字节们.push((val >> 8) & 0xFF, val & 0xFF);
           }
         }
-        // If :: was at the end and no explicit parts followed, ensure 8 parts
-        while (ipv6Bytes.length < 16) {
-            ipv6Bytes.push(0x00, 0x00);
+        while (ipv6字节们.length < 16) {
+            ipv6字节们.push(0x00, 0x00);
         }
-        转换访问地址 = new Uint8Array( [4, ...ipv6Bytes] );
+        目标地址字节们 = new Uint8Array([4, ...ipv6字节们]);
         break;
       default:
-        throw new Error ('无效的SOCKS5目标地址类型');
+        throw new Error('无效的 SOCKS5 目标地址类型');
     }
 
-    const 构建转换后的访问地址 = new Uint8Array([ 5, 1, 0, ...转换访问地址, 访问端口 >> 8, 访问端口 & 0xff ]);
-    await 传输数据.write(构建转换后的访问地址);
-    const 检查返回响应 = (await 读取数据.read()).value;
+    const 连接包裹 = new Uint8Array([5, 1, 0, ...目标地址字节们, 目标端口 >> 8, 目标端口 & 0xff]);
+    await 写入器.write(连接包裹);
+    const 连接回应 = (await 读取器.read()).value;
 
-    if (!检查返回响应 || 检查返回响应.length < 2 || 检查返回响应[0] !== 0x05 || 检查返回响应[1] !== 0x00) {
-      throw new Error (`SOCKS5目标地址连接失败，目标: ${访问地址}:${访问端口}, SOCKS5响应码: ${检查返回响应 ? 检查返回响应[1] : '无响应'}`);
+    if (!连接回应 || 连接回应.length < 2 || 连接回应[0] !== 0x05 || 连接回应[1] !== 0x00) {
+      throw new Error(`SOCKS5 目标接头失败。目标: ${目标地址}:${目标端口}, SOCKS5 回应码: ${连接回应 ? 连接回应[1] : '无回应'}`);
     }
 
-    传输数据.releaseLock();
-    读取数据.releaseLock();
-    return SOCKS5接口;
+    写入器.releaseLock();
+    读取器.releaseLock();
+    return 探子窝点;
   } catch (e) {
-    if (传输数据) 传输数据.releaseLock();
-    if (读取数据) 读取数据.releaseLock();
-    if (SOCKS5接口) SOCKS5接口.close();
-    // 抛出错误以便上层 (尝试创建SOCKS5接口) 捕获并跳过
+    if (写入器) 写入器.releaseLock();
+    if (读取器) 读取器.releaseLock();
+    if (探子窝点) 探子窝点.close();
     throw e;
   }
 }
 
-async function 建立传输管道(ws, tcp, init) {
-  // 发送 VL 握手成功的响应
+async function 接通水管(ws, tcp, 初始数据) {
+  // 发送匪帮接头成功的回应
   ws.send(new Uint8Array([0, 0]));
 
-  const writer = tcp.writable.getWriter();
-  const reader = tcp.readable.getReader();
+  const 写入器 = tcp.writable.getWriter();
+  const 读取器 = tcp.readable.getReader();
 
-  // 写入 VL 客户端的初始数据
-  if (init && init.byteLength > 0) {
-    await writer.write(init).catch(err => console.error("写入初始数据到 TCP 失败:", err));
+  // 写入匪帮客人发来的初始数据
+  if (初始数据 && 初始数据.byteLength > 0) {
+    await 写入器.write(初始数据).catch(err => console.error("写入初始数据到接头管子失败:", err));
   }
 
-  // WebSocket 到 TCP 的数据传输
+  // 寻常路人到接头管子 (WebSocket to TCP)
   ws.addEventListener('message', async e => {
     if (e.data instanceof ArrayBuffer) {
       try {
-        await writer.write(e.data);
+        await 写入器.write(e.data);
       } catch (err) {
-        console.error("从 WebSocket 写入 TCP 失败:", err);
-        // 如果写入失败，可以考虑关闭 WS，但这里更倾向于让 TCP 的错误处理来结束连接
+        console.error("从寻常路人写入到接头管子失败:", err);
       }
     } else {
-      console.warn("收到非 ArrayBuffer 类型数据 (WebSocket):", e.data);
+      console.warn("收到非二进制数据 (寻常路人):", e.data);
     }
   });
 
-  // TCP 到 WebSocket 的数据传输
+  // 接头管子到寻常路人 (TCP to WebSocket)
   try {
     while (true) {
-      const { value, done } = await reader.read();
-      if (done) break; // TCP 连接关闭
+      const { value, done } = await 读取器.read();
+      if (done) break;
       if (value) {
         try {
           ws.send(value);
-        } catch (sendErr) {
-          console.error("从 TCP 发送数据到 WebSocket 失败:", sendErr);
-          break; // 如果 WebSocket 发送失败，停止读取 TCP
+        } catch (发送错误) {
+          console.error("从接头管子发送数据到寻常路人失败:", 发送错误);
+          break;
         }
       }
     }
-  } catch (readErr) {
-    console.error("从 TCP 读取数据失败:", readErr);
+  } catch (读取错误) {
+    console.error("从接头管子读取数据失败:", 读取错误);
   } finally {
-    // 确保所有资源被关闭
-    try { ws.close(); } catch (e) { console.warn("关闭 WebSocket 失败:", e); }
-    try { reader.cancel(); } catch (e) { console.warn("取消 TCP 读取器失败:", e); }
-    try { writer.releaseLock(); } catch (e) { console.warn("释放 TCP 写入器锁失败:", e); }
-    try { tcp.close(); } catch (e) { console.warn("关闭 TCP 连接失败:", e); }
-    console.log("传输管道已关闭。");
+    try { ws.close(); } catch (e) { console.warn("关闭寻常路人失败:", e); }
+    try { 读取器.cancel(); } catch (e) { console.warn("取消接头管子读取失败:", e); }
+    try { 写入器.releaseLock(); } catch (e) { console.warn("释放接头管子写入锁失败:", e); }
+    try { tcp.close(); } catch (e) { console.warn("关闭接头管子失败:", e); }
+    console.log("水管接头已关闭。");
   }
 }
 
-function 验证VL的密钥(a) {
-  const hex = Array.from(a, v => v.toString(16).padStart(2, '0')).join('');
+function 获取匪帮暗号(数组) {
+  const hex = Array.from(数组, v => v.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
 }
 
-async function 获取SOCKS5账号(SOCKS5) {
-  const 分隔账号 = SOCKS5.lastIndexOf("@");
-  if (分隔账号 === -1) { // 如果没有账号密码，则直接是地址:端口
-    const [地址, 端口] = 解析地址端口(SOCKS5);
-    return { 账号: '', 密码: '', 地址, 端口 };
-  }
-  const 账号段 = SOCKS5.slice(0, 分隔账号);
-  const 地址段 = SOCKS5.slice(分隔账号 + 1);
-  const lastColonInAccount = 账号段.lastIndexOf(":");
-  const 账号 = lastColonInAccount > -1 ? 账号段.slice(0, lastColonInAccount) : '';
-  const 密码 = lastColonInAccount > -1 ? 账号段.slice(lastColonInAccount + 1) : '';
-  const [地址, 端口] = 解析地址端口(地址段);
-  return { 账号, 密码, 地址, 端口 };
-}
-
-function 解析地址端口(地址段) {
-  let 地址, 端口;
-  if (地址段.startsWith('[')) { // IPv6地址
-    const endBracket = 地址段.indexOf(']');
-    if (endBracket === -1) throw new Error('无效的 IPv6 地址格式');
-    地址 = 地址段.slice(1, endBracket);
-    // 检查是否有端口，例如 [::1]:8080
-    const portString = 地址段.slice(endBracket + 1);
-    端口 = portString.startsWith(':') ? Number(portString.slice(1)) : 443;
-    if (isNaN(端口) || 端口 <= 0 || 端口 > 65535) 端口 = 443; // 默认端口
-  } else { // IPv4或域名
-    const lastColon = 地址段.lastIndexOf(':');
-    if (lastColon > -1 && !isNaN(Number(地址段.slice(lastColon + 1)))) {
-      地址 = 地址段.slice(0, lastColon);
-      端口 = Number(地址段.slice(lastColon + 1));
-    } else {
-      地址 = 地址段;
-      端口 = 443; // 默认端口
-    }
-  }
-  return [地址, 端口];
-}
-
-async function 查询最快IP(访问域名) {
-  const 构造请求 = (type) =>
-    DOH服务器列表.map(DOH =>
-      fetch(`${DOH}?name=${访问域名}&type=${type}`, {
+async function 找到最快的窝点(域名) {
+  const 制造联络请求 = (类型) =>
+    探子联络点.map(联络点 =>
+      fetch(`${联络点}?name=${域名}&type=${类型}`, {
         headers: { 'Accept': 'application/dns-json' }
       }).then(res => res.json())
         .then(json => {
-          // A 记录 type 1, AAAA 记录 type 28
-          const ip = json.Answer?.find(r => r.type === (type === 'A' ? 1 : 28))?.data;
-          if (ip) return ip;
-          return Promise.reject(`无 ${type} 记录`);
+          const 窝点 = json.Answer?.find(r => r.type === (类型 === 'A' ? 1 : 28))?.data;
+          if (窝点) return 窝点;
+          return Promise.reject(`没有 ${类型} 记录`);
         })
-        .catch(err => Promise.reject(`${DOH} ${type} 请求失败: ${err}`))
+        .catch(err => Promise.reject(`${联络点} ${类型} 联络失败: ${err}`))
     );
   try {
-    // 优先尝试获取 A 记录 (IPv4)
-    return await Promise.any(构造请求('A'));
+    return await Promise.any(制造联络请求('A'));
   } catch (e) {
-    // 如果 IPv4 失败，尝试获取 AAAA 记录 (IPv6)
     try {
-      return await Promise.any(构造请求('AAAA'));
+      return await Promise.any(制造联络请求('AAAA'));
     } catch (e2) {
-      console.warn(`DOH 查询 ${访问域名} 失败 (IPv4 和 IPv6): ${e2.message}`);
-      return 访问域名; // 所有 DOH 查询失败，返回原始域名
+      console.warn(`联络 ${域名} 失败 (IPv4和IPv6都失败了): ${e2.message}`);
+      return 域名;
     }
   }
 }
 
-function 给我订阅页面(ID, host) {
+function 解析探子地址(地址字符串) {
+  const at索引 = 地址字符串.lastIndexOf("@");
+  if (at索引 === -1) {
+    const [窝点, 端口] = 解析窝点和端口(地址字符串);
+    return { 匪号: '', 密码: '', 窝点, 端口 };
+  }
+  const 认证部分 = 地址字符串.slice(0, at索引);
+  const 窝点部分 = 地址字符串.slice(at索引 + 1);
+  const 认证部分的最后一个冒号 = 认证部分.lastIndexOf(":");
+  const 匪号 = 认证部分的最后一个冒号 > -1 ? 认证部分.slice(0, 认证部分的最后一个冒号) : '';
+  const 密码 = 认证部分的最后一个冒号 > -1 ? 认证部分.slice(认证部分的最后一个冒号 + 1) : '';
+  const [窝点, 端口] = 解析窝点和端口(窝点部分);
+  return { 匪号, 密码, 窝点, 端口 };
+}
+
+function 解析窝点和端口(窝点部分) {
+  let 窝点, 端口;
+  if (窝点部分.startsWith('[')) {
+    const 结束括号 = 窝点部分.indexOf(']');
+    if (结束括号 === -1) throw new Error('无效的IPv6地址格式');
+    窝点 = 窝点部分.slice(1, 结束括号);
+    const 端口字符串 = 窝点部分.slice(结束括号 + 1);
+    端口 = 端口字符串.startsWith(':') ? Number(端口字符串.slice(1)) : 443;
+    if (isNaN(端口) || 端口 <= 0 || 端口 > 65535) 端口 = 443;
+  } else {
+    const 最后一个冒号 = 窝点部分.lastIndexOf(':');
+    if (最后一个冒号 > -1 && !isNaN(Number(窝点部分.slice(最后一个冒号 + 1)))) {
+      窝点 = 窝点部分.slice(0, 最后一个冒号);
+      端口 = Number(窝点部分.slice(最后一个冒号 + 1));
+    } else {
+      窝点 = 窝点部分;
+      端口 = 443;
+    }
+  }
+  return [窝点, 端口];
+}
+
+function 生成订阅页面(id, host) {
   return `
 1、本worker的私钥功能只支持通用订阅，其他请关闭私钥功能
 2、其他需求自行研究
-通用的：https${符号}${host}/${ID}/${转码}${转码2}
+通用的：https${接头口令}${host}/${id}/${客栈暗号}${接头后缀}
 `;
 }
 
-function 给我通用配置文件(host) {
-  // 检查 我的优选 和 我的优选TXT 是否为空或只包含空字符串
-  const isMyPreferredEmpty = 我的优选.length === 0 || (我的优选.length === 1 && 我的优选[0] === '');
-  const isMyPreferredTxtEmpty = 我的优选TXT.length === 0 || (我的优选TXT.length === 1 && 我的优选TXT[0] === '');
+function 生成配置文件(host) {
+  const 我优选的为空 = 优选据点们.length === 0 || (优选据点们.length === 1 && 优选据点们[0] === '');
+  const 我优选的TXT为空 = 优选据点名单.length === 0 || (优选据点名单.length === 1 && 优选据点名单[0] === '');
+  const 有用的优选据点们 = (!我优选的为空 || !我优选的TXT为空) ? 优选据点们 : [`${host}:443#备用节点`];
 
-  // 如果 我的优选 和 我的优选TXT 都为空，则使用备用节点信息
-  const effectiveMyPreferred = (!isMyPreferredEmpty || !isMyPreferredTxtEmpty) ? 我的优选 : [`${host}:443#备用节点`];
-
-  if (私钥开关) {
+  if (启用信物) {
     return `请先关闭私钥功能`;
   } else {
-    return effectiveMyPreferred.map(item => {
-      // 检查 item 是否包含 @ (tls 配置)
+    return 有用的优选据点们.map(item => {
       const parts = item.split("@");
       let mainPart = parts[0];
-      let tlsOption = 'security=tls'; // 默认启用 TLS
+      let tlsOption = 'security=tls';
 
       if (parts.length > 1) {
-          // 如果有 @ 符号，则后面的部分可能是 tls 配置
           const tlsConfig = parts[1];
           if (tlsConfig.toLowerCase() === 'notls') {
               tlsOption = 'security=none';
           }
-          // 如果还有其他 tls 配置，可以在这里扩展解析
       }
 
-      const [addrPort, name = 我的节点名字] = mainPart.split("#");
+      const [addrPort, name = 我家寨名] = mainPart.split("#");
       const addrParts = addrPort.split(":");
       const port = addrParts.length > 1 && !isNaN(Number(addrParts[addrParts.length - 1])) ? Number(addrParts.pop()) : 443;
-      const addr = addrParts.join(":"); // 重新组合地址，处理 IPv6 带冒号的情况
+      const addr = addrParts.join(":");
 
-      return `${转码}${转码2}${符号}${哎呀呀这是我的VL密钥}@${addr}:${port}?encryption=none&${tlsOption}&sni=${host}&type=ws&host=${host}&path=%2F%3Fed%3D2560#${name}`;
+      return `${客栈暗号}${接头后缀}${接头口令}${匪帮暗号}@${addr}:${port}?encryption=none&${tlsOption}&sni=${host}&type=ws&host=${host}&path=%2F%3Ded%3D2560#${name}`;
     }).join("\n");
   }
-		}
+	  }
