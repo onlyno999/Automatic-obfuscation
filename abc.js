@@ -1,78 +1,78 @@
 // ====================================================================
-// 云端响马工头：飞来石客栈的暗号 + SOCKS5 (带同伙SOCKS5代理的选择权)
+// สหายชาวไร่ของ Cloudflare: เส้นทาง VL กับสายลับ SOCKS5 (พร้อมการเลือกสายลับ SOCKS5 หลายตัว)
 // --------------------------------------------------------------------
 
-// 云端工头暗号本 (环境变量) 记事：
-//   大当家    必填，飞来石客栈客人的暗号
-//   二当家    可选，接头路径 (默认 123456)
-//   探子窝点  可选，老窝地址 user:pass@127.0.0.1:1080，探子名单失效时用
-//   探子名单  可选，暗桩窝点的名单，例如：https://example.com/socks5_list.txt
-//   探子限时  = 5000; // 探子接头时间 (毫秒)，可选
-//   探子启用  可选，true|false，true用探子反向接头，false直连 (默认 true)
-//   探子全员  可选，true|false，true全员用探子，false只在直连失败时用 (默认 true)
-//   藏宝图    可选，true|false，true时接头只给一句黑话
-//   秘密信物  可选，用于接头暗号的私密信物
-//   信物开关  可选，true|false，是否启用私密信物认证
-//   黑话      可选，藏宝图时返回的黑话
+// บัญชีลับของชาวไร่ (ตัวแปรสภาพแวดล้อม) หมายเหตุ:
+//   รหัสลับใหญ่    ต้องมี, รหัสลูกค้าของ VL
+//   รหัสลับเล็ก    เลือกได้, เส้นทางการสมัคร (ค่าเริ่มต้น 123456)
+//   รังสายลับ     เลือกได้, ที่อยู่เก่า user:pass@127.0.0.1:1080 ใช้เมื่อรายชื่อสายลับล้มเหลว
+//   รายชื่อสายลับ  เลือกได้, รายชื่อรังสายลับ เช่น: https://example.com/socks5_list.txt
+//   สายลับจำกัดเวลา  = 5000; // เวลาเชื่อมต่อสายลับ (มิลลิวินาที)
+//   เปิดใช้สายลับ  เลือกได้, true|false, true เปิดใช้สายลับ, false ปิด (ค่าเริ่มต้น true)
+//   สายลับรวมหมู่  เลือกได้, true|false, true ให้ทุกคนใช้สายลับ, false เฉพาะเมื่อเชื่อมต่อตรงล้มเหลว (ค่าเริ่มต้น true)
+//   แผนที่ขุมทรัพย์  เลือกได้, true|false, true เมื่อเรียกใช้ จะให้แค่คำพูดลับ
+//   ของวิเศษลับ    เลือกได้, ของวิเศษส่วนตัวสำหรับยืนยันตัวตน
+//   สวิตช์วิเศษ    เลือกได้, true|false, จะเปิดใช้การยืนยันตัวตนด้วยของวิเศษหรือไม่
+//   คำพูดลับ      เลือกได้, คำพูดลับที่จะตอบเมื่อซ่อนแผนที่
 //
 // ====================================================================
 
 import { connect } from 'cloudflare:sockets';
 
-const 客栈暗号 = 'vl';
-const 接头后缀 = 'ess';
-const 接头口令 = '://';
+const รหัสเส้นทาง = 'vl';
+const รหัสส่วนท้าย = 'ess';
+const คำสั่งเชื่อมต่อ = '://';
 
-//////////////////////////////////////////////////////////////////////////匪帮据点规矩////////////////////////////////////////////////////////////////////////
-let 匪帮路径 = "123456";
-let 匪帮暗号 = "25dce6e6-1c37-4e8c-806b-5ef8affd9f55";
+//////////////////////////////////////////////////////////////////////////กฎของรังโจร////////////////////////////////////////////////////////////////////////
+let เส้นทางลับ = "123456";
+let รหัสลับใหญ่ = "25dce6e6-1c37-4e8c-806b-5ef8affd9f55";
 
-let 启用信物 = false;
-let 秘密信物 = "";
+let เปิดใช้ของวิเศษ = false;
+let ของวิเศษลับ = "";
 
-let 藏宝图 = false;
-let 黑话 = "哎呀你找到了我，但是我就是不给你看，气不气，嘿嘿嘿";
+let ซ่อนแผนที่ = false;
+let คำพูดลับ = "โอ๊ย เจ้าเจอข้าแล้ว แต่ข้าไม่ให้เจ้าดูหรอก โกรธไหมล่ะ ฮี่ฮี่ฮี่";
 
-let 优选据点们 = ['cloudflare-ddns.zone.id:443#北美匪帮大寨'];
-let 优选据点名单 = [''];
+let รังลับที่ชอบ = ['cloudflare-ddns.zone.id:443#รังโจรหลักในอเมริกา'];
+let รายชื่อรังลับที่ชอบ = [''];
 
-let 我家寨名 = 'SOCKS5版';
+let ชื่อรังของข้า = 'รุ่นสายลับ';
 
-// 探子窝点规矩
-let 启用探子窝点 = true;
-let 探子窝点全员 = true;
-let 备用探子窝点 = '';
+// กฎของรังสายลับ
+let เปิดใช้รังสายลับ = true;
+let สายลับทั้งหมด = true;
+let รังสายลับสำรอง = '';
 
-// 新规矩：探子窝点名单
-let 探子窝点名单 = '';
+// กฎใหม่: รายชื่อรังสายลับ
+let รายชื่อสายลับ = '';
 
-// 探子窝点和上次更新时间
-let 探子窝点池 = [];
-let 探子上次更新 = 0;
-const 探子刷新时辰 = 5 * 60 * 1000; // 5 分钟 (毫秒)
-const 探子接头限时 = 5000; // 探子接头超时 (毫秒)
+// กลุ่มสายลับและเวลาอัปเดตล่าสุด
+let กลุ่มสายลับ = [];
+let เวลาอัปเดตล่าสุด = 0;
+const ระยะเวลาการอัปเดต = 5 * 60 * 1000; // 5 นาที (มิลลิวินาที)
+const เวลาเชื่อมต่อสายลับ = 5000; // การเชื่อมต่อสายลับหมดเวลา (มิลลิวินาที)
 
-const 探子联络点 = [
+const จุดติดต่อสายลับ = [
   "https://dns.google/dns-query",
   "https://cloudflare-dns.com/dns-query",
   "https://1.1.1.1/dns-query",
   "https://dns.quad9.net/dns-query",
 ];
 
-// --- 新规矩：乔装打扮和窝点页面 ---
-const 乔装窝点 = 'https://cf-worker-dir-bke.pages.dev/';
+// --- กฎใหม่: การปลอมตัวและหน้าเว็บรังโจร ---
+const หน้าเว็บปลอม = 'https://cf-worker-dir-bke.pages.dev/';
 
-async function 扮作寻常人家() {
+async function ปลอมตัวเป็นบ้านคนทั่วไป() {
   try {
-    const res = await fetch(乔装窝点, { cf: { cacheEverything: true } });
+    const res = await fetch(หน้าเว็บปลอม, { cf: { cacheEverything: true } });
     return new Response(res.body, res);
   } catch {
     return new Response(
       `<!DOCTYPE html>
        <html>
-         <head><title>欢迎光临</title></head>
-         <body><h1>云端响马工头已在此安寨</h1>
-         <p>此页面为静态伪装页面（联络失败）。</p></body>
+         <head><title>ยินดีต้อนรับ</title></head>
+         <body><h1>สหายชาวไร่ของ Cloudflare ได้ตั้งรังที่นี่แล้ว</h1>
+         <p>หน้านี้เป็นหน้าปลอมตัวแบบคงที่ (การเชื่อมต่อระยะไกลล้มเหลว)</p></body>
        </html>`,
       {
         status: 200,
@@ -81,118 +81,118 @@ async function 扮作寻常人家() {
     );
   }
 }
-// --- 规矩结束 ---
+// --- จบกฎ ---
 
-const 摸清环境变量 = (名字, 替补, 巢穴) => {
-  const 原始值 = import.meta?.env?.[名字] ?? 巢穴?.[名字];
-  if (原始值 === undefined || 原始值 === null || 原始值 === '') return 替补;
-  if (typeof 原始值 === 'string') {
-    const 修剪值 = 原始值.trim();
-    if (修剪值 === 'true') return true;
-    if (修剪值 === 'false') return false;
-    if (修剪值.includes('\n')) {
-      return 修剪值.split('\n').map(item => item.trim()).filter(Boolean);
+const เช็คตัวแปรสภาพแวดล้อม = (ชื่อ, ตัวสำรอง, ที่อยู่) => {
+  const ค่าเริ่มต้น = import.meta?.env?.[ชื่อ] ?? ที่อยู่?.[ชื่อ];
+  if (ค่าเริ่มต้น === undefined || ค่าเริ่มต้น === null || ค่าเริ่มต้น === '') return ตัวสำรอง;
+  if (typeof ค่าเริ่มต้น === 'string') {
+    const ค่าที่ตัดแต่ง = ค่าเริ่มต้น.trim();
+    if (ค่าที่ตัดแต่ง === 'true') return true;
+    if (ค่าที่ตัดแต่ง === 'false') return false;
+    if (ค่าที่ตัดแต่ง.includes('\n')) {
+      return ค่าที่ตัดแต่ง.split('\n').map(item => item.trim()).filter(Boolean);
     }
-    if (!isNaN(修剪值) && 修剪值 !== '') return Number(修剪值);
-    return 修剪值;
+    if (!isNaN(ค่าที่ตัดแต่ง) && ค่าที่ตัดแต่ง !== '') return Number(ค่าที่ตัดแต่ง);
+    return ค่าที่ตัดแต่ง;
   }
-  return 原始值;
+  return ค่าเริ่มต้น;
 };
 
-// 新规矩：加载探子窝点名单
-async function 加载探子窝点名单() {
-  if (!探子窝点名单) {
-    console.log('探子名单未配置，跳过加载。');
+// กฎใหม่: โหลดรายชื่อรังสายลับ
+async function โหลดรายชื่อรังสายลับ() {
+  if (!รายชื่อสายลับ) {
+    console.log('รายชื่อสายลับไม่ได้ตั้งค่าไว้');
     return;
   }
 
-  const 当前时辰 = Date.now();
-  if (当前时辰 - 探子上次更新 < 探子刷新时辰 && 探子窝点池.length > 0) {
+  const เวลาปัจจุบัน = Date.now();
+  if (เวลาปัจจุบัน - เวลาอัปเดตล่าสุด < ระยะเวลาการอัปเดต && กลุ่มสายลับ.length > 0) {
     return;
   }
 
-  console.log('正在加载探子名单...');
+  console.log('กำลังโหลดรายชื่อสายลับ...');
   try {
-    const response = await fetch(探子窝点名单);
+    const response = await fetch(รายชื่อสายลับ);
     if (!response.ok) {
-      throw new Error(`加载探子名单失败: ${response.statusText} (状态: ${response.status})`);
+      throw new Error(`โหลดรายชื่อสายลับล้มเหลว: ${response.statusText} (สถานะ: ${response.status})`);
     }
     const text = await response.text();
-    const 地址们 = text.split('\n')
+    const ที่อยู่ทั้งหมด = text.split('\n')
                            .map(line => line.trim())
                            .filter(line => line && !line.startsWith('#'));
 
-    if (地址们.length > 0) {
-      探子窝点池 = 地址们;
-      探子上次更新 = 当前时辰;
-      console.log(`成功加载 ${探子窝点池.length} 个探子窝点。`);
+    if (ที่อยู่ทั้งหมด.length > 0) {
+      กลุ่มสายลับ = ที่อยู่ทั้งหมด;
+      เวลาอัปเดตล่าสุด = เวลาปัจจุบัน;
+      console.log(`โหลดที่อยู่สายลับสำเร็จ ${กลุ่มสายลับ.length} ที่อยู่`);
     } else {
-      console.warn('探子名单文件为空或无有效窝点。保留上次成功的名单。');
+      console.warn('ไฟล์รายชื่อสายลับว่างเปล่าหรือไม่มีที่อยู่ที่ถูกต้อง จะใช้รายชื่อที่เคยโหลดสำเร็จครั้งล่าสุด');
     }
   } catch (e) {
-    console.error(`加载探子名单失败: ${e.message}。将使用备用窝点（如已配置）或上次的成功名单。`);
+    console.error(`โหลดรายชื่อสายลับล้มเหลว: ${e.message} จะใช้รังสำรอง (ถ้าตั้งค่าไว้) หรือรายชื่อที่เคยโหลดสำเร็จ`);
   }
 }
 
 export default {
   async fetch(request, env) {
-    // 摸清环境变量
-    匪帮路径 = 摸清环境变量('ID', 匪帮路径, env);
-    匪帮暗号 = 摸清环境变量('UUID', 匪帮暗号, env);
-    优选据点们 = 摸清环境变量('IP', 优选据点们, env);
-    优选据点名单 = 摸清环境变量('TXT', 优选据点名单, env);
-    秘密信物 = 摸清环境变量('私钥', 秘密信物, env);
-    藏宝图 = 摸清环境变量('隐藏', 藏宝图, env);
-    启用信物 = 摸清环境变量('私钥开关', 启用信物, env);
-    黑话 = 摸清环境变量('嘲讽语', 黑话, env);
-    我家寨名 = 摸清环境变量('我的节点名字', 我家寨名, env);
+    // เช็คตัวแปรสภาพแวดล้อม
+    เส้นทางลับ = เช็คตัวแปรสภาพแวดล้อม('ID', เส้นทางลับ, env);
+    รหัสลับใหญ่ = เช็คตัวแปรสภาพแวดล้อม('UUID', รหัสลับใหญ่, env);
+    รังลับที่ชอบ = เช็คตัวแปรสภาพแวดล้อม('IP', รังลับที่ชอบ, env);
+    รายชื่อรังลับที่ชอบ = เช็คตัวแปรสภาพแวดล้อม('TXT', รายชื่อรังลับที่ชอบ, env);
+    ของวิเศษลับ = เช็คตัวแปรสภาพแวดล้อม('私钥', ของวิเศษลับ, env);
+    ซ่อนแผนที่ = เช็คตัวแปรสภาพแวดล้อม('隐藏', ซ่อนแผนที่, env);
+    เปิดใช้ของวิเศษ = เช็คตัวแปรสภาพแวดล้อม('私钥开关', เปิดใช้ของวิเศษ, env);
+    คำพูดลับ = เช็คตัวแปรสภาพแวดล้อม('嘲讽语', คำพูดลับ, env);
+    ชื่อรังของข้า = เช็คตัวแปรสภาพแวดล้อม('我的节点名字', ชื่อรังของข้า, env);
 
-    // 摸清探子窝点环境变量
-    启用探子窝点 = 摸清环境变量('SOCKS5_ENABLE', 启用探子窝点, env);
-    探子窝点全员 = 摸清环境变量('SOCKS5_GLOBAL', 探子窝点全员, env);
-    备用探子窝点 = 摸清环境变量('SOCKS5_ADDRESS', 备用探子窝点, env);
-    探子窝点名单 = 摸清环境变量('SOCKS5_TXT_URL', 探子窝点名单, env);
+    // เช็คตัวแปรเกี่ยวกับรังสายลับ
+    เปิดใช้รังสายลับ = เช็คตัวแปรสภาพแวดล้อม('SOCKS5_ENABLE', เปิดใช้รังสายลับ, env);
+    สายลับทั้งหมด = เช็คตัวแปรสภาพแวดล้อม('SOCKS5_GLOBAL', สายลับทั้งหมด, env);
+    รังสายลับสำรอง = เช็คตัวแปรสภาพแวดล้อม('SOCKS5_ADDRESS', รังสายลับสำรอง, env);
+    รายชื่อสายลับ = เช็คตัวแปรสภาพแวดล้อม('SOCKS5_TXT_URL', รายชื่อสายลับ, env);
 
-    await 加载探子窝点名单();
+    await โหลดรายชื่อรังสายลับ();
 
-    const 升级暗号 = request.headers.get('Upgrade');
+    const รหัสเชื่อมต่อ = request.headers.get('Upgrade');
     const url = new URL(request.url);
 
-    if (!升级暗号 || 升级暗号 !== 'websocket') {
-      // 没对上暗号，处理寻常路人
-      if (优选据点名单) {
-        const urlArray = Array.isArray(优选据点名单) ? 优选据点名单 : [优选据点名单];
-        const 所有据点 = [];
+    if (!รหัสเชื่อมต่อ || รหัสเชื่อมต่อ !== 'websocket') {
+      // ไม่ใช่การเชื่อมต่อลับ, จัดการคำขอทั่วไป
+      if (รายชื่อรังลับที่ชอบ) {
+        const urlArray = Array.isArray(รายชื่อรังลับที่ชอบ) ? รายชื่อรังลับที่ชอบ : [รายชื่อรังลับที่ชอบ];
+        const ทุกรัง = [];
         for (const link of urlArray) {
           try {
             const response = await fetch(link);
             const text = await response.text();
-            const 据点们 = text.split('\n').map(line => line.trim()).filter(line => line);
-            所有据点.push(...据点们);
+            const รังที่พบ = text.split('\n').map(line => line.trim()).filter(line => line);
+            ทุกรัง.push(...รังที่พบ);
           } catch (e) {
-            console.warn(`从名单联络据点失败: ${link}`, e);
+            console.warn(`การติดต่อกับรังลับล้มเหลว: ${link}`, e);
           }
         }
-        if (所有据点.length > 0) 优选据点们 = 所有据点;
+        if (ทุกรัง.length > 0) รังลับที่ชอบ = ทุกรัง;
       }
       switch (url.pathname) {
         case '/':
-          return 扮作寻常人家();
-        case `/${匪帮路径}`: {
-          const sub = 生成订阅页面(匪帮路径, request.headers.get('Host'));
+          return ปลอมตัวเป็นบ้านคนทั่วไป();
+        case `/${เส้นทางลับ}`: {
+          const sub = สร้างหน้าแผนที่(เส้นทางลับ, request.headers.get('Host'));
           return new Response(sub, {
             status: 200,
             headers: { "Content-Type": "text/plain;charset=utf-8" }
           });
         }
-        case `/${匪帮路径}/${客栈暗号}${接头后缀}`: {
-          if (藏宝图) {
-            return new Response(黑话, {
+        case `/${เส้นทางลับ}/${รหัสเส้นทาง}${รหัสส่วนท้าย}`: {
+          if (ซ่อนแผนที่) {
+            return new Response(คำพูดลับ, {
               status: 200,
               headers: { "Content-Type": "text/plain;charset=utf-8" }
             });
           } else {
-            const config = 生成配置文件(request.headers.get('Host'));
+            const config = สร้างไฟล์การตั้งค่า(request.headers.get('Host'));
             return new Response(config, {
               status: 200,
               headers: { "Content-Type": "text/plain;charset=utf-8" }
@@ -200,380 +200,380 @@ export default {
           }
         }
         default:
-          return new Response('来者何人!', { status: 200 });
+          return new Response('ใครกัน!', { status: 200 });
       }
     } else {
-      // 对上暗号，处理接头人
-      if (启用信物) {
+      // ได้รหัสลับ, จัดการการเชื่อมต่อลับ
+      if (เปิดใช้ของวิเศษ) {
         const k = request.headers.get('my-key');
-        if (k !== 秘密信物) return new Response('信物不对，杀！', { status: 403 });
+        if (k !== ของวิเศษลับ) return new Response('ของวิเศษไม่ถูกต้อง, ฆ่ามัน!', { status: 403 });
       }
-      const 编码 = request.headers.get('sec-websocket-protocol');
-      const 数据 = 解码天书(编码);
-      if (!启用信物 && 获取匪帮暗号(new Uint8Array(数据.slice(1, 17))) !== 匪帮暗号) {
-        return new Response('暗号不对', { status: 403 });
+      const การเข้ารหัส = request.headers.get('sec-websocket-protocol');
+      const ข้อมูล = ถอดรหัสลับ(การเข้ารหัส);
+      if (!เปิดใช้ของวิเศษ && รับรหัสลับใหญ่(new Uint8Array(ข้อมูล.slice(1, 17))) !== รหัสลับใหญ่) {
+        return new Response('รหัสลับไม่ถูกต้อง', { status: 403 });
       }
       try {
-        const { tcpSocket, 初始数据 } = await 解析匪帮暗号(数据);
-        return await 处理接头升级(request, tcpSocket, 初始数据);
+        const { tcpSocket, ข้อมูลเริ่มต้น } = await แยกแยะรหัสลับ(ข้อมูล);
+        return await จัดการการเชื่อมต่อลับ(request, tcpSocket, ข้อมูลเริ่มต้น);
       } catch (e) {
-        console.error("匪帮暗号解析或接头失败:", e);
-        return new Response(`接头失败: ${e.message}`, { status: 502 });
+        console.error("การแยกแยะรหัสลับหรือการเชื่อมต่อล้มเหลว:", e);
+        return new Response(`การเชื่อมต่อล้มเหลว: ${e.message}`, { status: 502 });
       }
     }
   }
 };
 
-async function 处理接头升级(请求, 接头暗号, 初始数据) {
-  const { 0: 寻常路人, 1: 接头人 } = new WebSocketPair();
-  接头人.accept();
-  接通水管(接头人, 接头暗号, 初始数据);
-  return new Response(null, { status: 101, webSocket: 寻常路人 });
+async function จัดการการเชื่อมต่อลับ(คำขอ, การเชื่อมต่อ, ข้อมูลเริ่มต้น) {
+  const { 0: ลูกค้าทั่วไป, 1: คนส่งของ } = new WebSocketPair();
+  คนส่งของ.accept();
+  ส่งข้อมูล(คนส่งของ, การเชื่อมต่อ, ข้อมูลเริ่มต้น);
+  return new Response(null, { status: 101, webSocket: ลูกค้าทั่วไป });
 }
 
-function 解码天书(天书) {
-  天书 = 天书.replace(/-/g, '+').replace(/_/g, '/');
-  return Uint8Array.from(atob(天书), c => c.charCodeAt(0)).buffer;
+function ถอดรหัสลับ(ข้อความ) {
+  ข้อความ = ข้อความ.replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(ข้อความ), c => c.charCodeAt(0)).buffer;
 }
 
-async function 解析匪帮暗号(缓存) {
-  const 数据视图 = new DataView(缓存), 字节数组 = new Uint8Array(缓存);
-  const 数据位置 = 字节数组[17];
-  const 端口位置 = 18 + 数据位置 + 1;
-  const 目标端口 = 数据视图.getUint16(端口位置);
-  if (目标端口 === 53) throw new Error('拒绝DNS联络');
-  const 地址位置 = 端口位置 + 2;
-  let 地址类型 = 字节数组[地址位置];
-  let 地址信息位置 = 地址位置 + 1;
-  let 目标地址;
-  let 地址长度;
+async function แยกแยะรหัสลับ(บัฟเฟอร์) {
+  const มุมมองข้อมูล = new DataView(บัฟเฟอร์), ข้อมูลไบต์ = new Uint8Array(บัฟเฟอร์);
+  const ตำแหน่งข้อมูล = ข้อมูลไบต์[17];
+  const ตำแหน่งพอร์ต = 18 + ตำแหน่งข้อมูล + 1;
+  const พอร์ตเป้าหมาย = มุมมองข้อมูล.getUint16(ตำแหน่งพอร์ต);
+  if (พอร์ตเป้าหมาย === 53) throw new Error('ปฏิเสธการเชื่อมต่อ DNS');
+  const ตำแหน่งที่อยู่ = ตำแหน่งพอร์ต + 2;
+  let ประเภทที่อยู่ = ข้อมูลไบต์[ตำแหน่งที่อยู่];
+  let ตำแหน่งข้อมูลที่อยู่ = ตำแหน่งที่อยู่ + 1;
+  let ที่อยู่เป้าหมาย;
+  let ความยาวที่อยู่;
 
-  switch (地址类型) {
+  switch (ประเภทที่อยู่) {
     case 1: // IPv4
-      地址长度 = 4;
-      目标地址 = Array.from(字节数组.slice(地址信息位置, 地址信息位置 + 地址长度)).join('.');
+      ความยาวที่อยู่ = 4;
+      ที่อยู่เป้าหมาย = Array.from(ข้อมูลไบต์.slice(ตำแหน่งข้อมูลที่อยู่, ตำแหน่งข้อมูลที่อยู่ + ความยาวที่อยู่)).join('.');
       break;
-    case 2: // 域名
-      地址长度 = 字节数组[地址信息位置];
-      地址信息位置 += 1;
-      const 域名 = new TextDecoder().decode(字节数组.slice(地址信息位置, 地址信息位置 + 地址长度));
-      目标地址 = await 找到最快的窝点(域名);
-      if (目标地址 !== 域名) {
-        地址类型 = 目标地址.includes(':') ? 3 : 1;
+    case 2: // โดเมน
+      ความยาวที่อยู่ = ข้อมูลไบต์[ตำแหน่งข้อมูลที่อยู่];
+      ตำแหน่งข้อมูลที่อยู่ += 1;
+      const โดเมน = new TextDecoder().decode(ข้อมูลไบต์.slice(ตำแหน่งข้อมูลที่อยู่, ตำแหน่งข้อมูลที่อยู่ + ความยาวที่อยู่));
+      ที่อยู่เป้าหมาย = await หารังที่เร็วที่สุด(โดเมน);
+      if (ที่อยู่เป้าหมาย !== โดเมน) {
+        ประเภทที่อยู่ = ที่อยู่เป้าหมาย.includes(':') ? 3 : 1;
       }
       break;
     case 3: // IPv6
-      地址长度 = 16;
+      ความยาวที่อยู่ = 16;
       const ipv6 = [];
-      const ipv6视图 = new DataView(缓存, 地址信息位置, 16);
-      for (let i = 0; i < 8; i++) ipv6.push(ipv6视图.getUint16(i * 2).toString(16));
-      目标地址 = ipv6.join(':');
+      const มุมมองipv6 = new DataView(บัฟเฟอร์, ตำแหน่งข้อมูลที่อยู่, 16);
+      for (let i = 0; i < 8; i++) ipv6.push(มุมมองipv6.getUint16(i * 2).toString(16));
+      ที่อยู่เป้าหมาย = ipv6.join(':');
       break;
     default:
-      throw new Error('无效的目标地址类型');
+      throw new Error('ประเภทที่อยู่เป้าหมายไม่ถูกต้อง');
   }
 
-  const 初始数据 = 缓存.slice(地址信息位置 + 地址长度);
-  let 接头暗号;
+  const ข้อมูลเริ่มต้น = บัฟเฟอร์.slice(ตำแหน่งข้อมูลที่อยู่ + ความยาวที่อยู่);
+  let การเชื่อมต่อ;
 
-  if (启用探子窝点) {
-    if (探子窝点全员) {
-      接头暗号 = await 建立探子接头(地址类型, 目标地址, 目标端口);
+  if (เปิดใช้รังสายลับ) {
+    if (สายลับทั้งหมด) {
+      การเชื่อมต่อ = await สร้างการเชื่อมต่อสายลับ(ประเภทที่อยู่, ที่อยู่เป้าหมาย, พอร์ตเป้าหมาย);
     } else {
       try {
-        接头暗号 = connect({ hostname: 目标地址, port: 目标端口 });
-        await 接头暗号.opened;
+        การเชื่อมต่อ = connect({ hostname: ที่อยู่เป้าหมาย, port: พอร์ตเป้าหมาย });
+        await การเชื่อมต่อ.opened;
       } catch (e) {
-        console.warn(`直连 ${目标地址}:${目标端口} 失败，尝试探子接头: ${e.message}`);
-        接头暗号 = await 建立探子接头(地址类型, 目标地址, 目标端口);
+        console.warn(`การเชื่อมต่อตรงไปที่ ${ที่อยู่เป้าหมาย}:${พอร์ตเป้าหมาย} ล้มเหลว, ลองใช้สายลับ: ${e.message}`);
+        การเชื่อมต่อ = await สร้างการเชื่อมต่อสายลับ(ประเภทที่อยู่, ที่อยู่เป้าหมาย, พอร์ตเป้าหมาย);
       }
     }
   } else {
-    接头暗号 = connect({ hostname: 目标地址, port: 目标端口 });
+    การเชื่อมต่อ = connect({ hostname: ที่อยู่เป้าหมาย, port: พอร์ตเป้าหมาย });
   }
 
-  await 接头暗号.opened;
-  return { tcpSocket: 接头暗号, 初始数据 };
+  await การเชื่อมต่อ.opened;
+  return { tcpSocket: การเชื่อมต่อ, ข้อมูลเริ่มต้น };
 }
 
-async function 建立探子接头(地址类型, 目标地址, 目标端口) {
-  let 要试的探子们 = [];
+async function สร้างการเชื่อมต่อสายลับ(ประเภทที่อยู่, ที่อยู่เป้าหมาย, พอร์ตเป้าหมาย) {
+  let สายลับที่จะลอง = [];
 
-  if (探子窝点池.length > 0) {
-    要试的探子们 = [...探子窝点池];
+  if (กลุ่มสายลับ.length > 0) {
+    สายลับที่จะลอง = [...กลุ่มสายลับ];
   }
 
-  if (要试的探子们.length === 0 && 备用探子窝点) {
-    要试的探子们.push(备用探子窝点);
+  if (สายลับที่จะลอง.length === 0 && รังสายลับสำรอง) {
+    สายลับที่จะลอง.push(รังสายลับสำรอง);
   }
 
-  if (要试的探子们.length === 0) {
-    throw new Error('没有配置探子窝点 (探子名单或探子窝点)。');
+  if (สายลับที่จะลอง.length === 0) {
+    throw new Error('ไม่ได้ตั้งค่ารังสายลับไว้ (รายชื่อสายลับหรือรังสายลับสำรอง)');
   }
 
-  const 接头承诺们 = 要试的探子们.map(async (窝点配置, 索引) => {
-    let 接头暗号 = null;
+  const คำสัญญาการเชื่อมต่อ = สายลับที่จะลอง.map(async (การตั้งค่าสายลับ, ดัชนี) => {
+    let การเชื่อมต่อ = null;
     try {
-      const { 匪号, 密码, 窝点, 端口 } = 解析探子地址(窝点配置);
-      console.log(`正在尝试与探子接头: ${匪号 ? '带暗号' : '不带暗号'} ${窝点}:${端口} (探子 ${索引 + 1}/${要试的探子们.length})`);
+      const { ชื่อ, รหัส, รัง, พอร์ต } = แยกแยะที่อยู่สายลับ(การตั้งค่าสายลับ);
+      console.log(`กำลังพยายามเชื่อมต่อสายลับ: ${ชื่อ ? 'พร้อมรหัส' : 'ไม่มีรหัส'} ${รัง}:${พอร์ต} (สายลับ ${ดัชนี + 1}/${สายลับที่จะลอง.length})`);
 
-      const 超时承诺 = new Promise((resolve, reject) => {
+      const คำสัญญาหมดเวลา = new Promise((resolve, reject) => {
         const id = setTimeout(() => {
-          reject(new Error(`接头超时: ${窝点}:${端口}`));
-        }, 探子接头限时);
+          reject(new Error(`การเชื่อมต่อหมดเวลา: ${รัง}:${พอร์ต}`));
+        }, เวลาเชื่อมต่อสายลับ);
       });
 
-      接头暗号 = await Promise.race([
-        实现探子接头(匪号, 密码, 窝点, 端口, 地址类型, 目标地址, 目标端口),
-        超时承诺
+      การเชื่อมต่อ = await Promise.race([
+        สร้างการเชื่อมต่อสายลับจริง(ชื่อ, รหัส, รัง, พอร์ต, ประเภทที่อยู่, ที่อยู่เป้าหมาย, พอร์ตเป้าหมาย),
+        คำสัญญาหมดเวลา
       ]);
 
-      console.log(`成功与探子接头: ${窝点}:${端口}`);
-      return { socket: 接头暗号, config: 窝点配置 };
+      console.log(`เชื่อมต่อกับสายลับสำเร็จ: ${รัง}:${พอร์ต}`);
+      return { socket: การเชื่อมต่อ, config: การตั้งค่าสายลับ };
     } catch (e) {
-      console.warn(`探子接头失败或超时 (${窝点配置}): ${e.message}`);
-      if (接头暗号) {
-        try { 接头暗号.close(); } catch (关闭错误) { console.warn("关闭失败的接头出错:", 关闭错误); }
+      console.warn(`การเชื่อมต่อสายลับล้มเหลวหรือหมดเวลา (${การตั้งค่าสายลับ}): ${e.message}`);
+      if (การเชื่อมต่อ) {
+        try { การเชื่อมต่อ.close(); } catch (closeErr) { console.warn("ข้อผิดพลาดในการปิดการเชื่อมต่อที่ล้มเหลว:", closeErr); }
       }
-      return Promise.reject(new Error(`探子失败: ${窝点配置} - ${e.message}`));
+      return Promise.reject(new Error(`สายลับล้มเหลว: ${การตั้งค่าสายลับ} - ${e.message}`));
     }
   });
 
   try {
-    const { socket } = await Promise.any(接头承诺们);
+    const { socket } = await Promise.any(คำสัญญาการเชื่อมต่อ);
     return socket;
-  } catch (总错误) {
-    console.error(`所有探子接头都失败了:`, 总错误.errors.map(e => e.message).join('; '));
-    throw new Error('所有探子接头都失败了。');
+  } catch (errorรวม) {
+    console.error(`ความพยายามเชื่อมต่อสายลับทั้งหมดล้มเหลว:`, errorรวม.errors.map(e => e.message).join('; '));
+    throw new Error('ความพยายามเชื่อมต่อสายลับทั้งหมดล้มเหลว');
   }
 }
 
-async function 实现探子接头(匪号, 密码, 窝点, 端口, 地址类型, 目标地址, 目标端口) {
-  const 探子窝点 = connect({ hostname: 窝点, port: 端口 });
-  let 写入器, 读取器;
+async function สร้างการเชื่อมต่อสายลับจริง(ชื่อ, รหัส, รัง, พอร์ต, ประเภทที่อยู่, ที่อยู่เป้าหมาย, พอร์ตเป้าหมาย) {
+  const สายลับซอกเก็ต = connect({ hostname: รัง, port: พอร์ต });
+  let writer, reader;
   try {
-    await 探子窝点.opened;
-    写入器 = 探子窝点.writable.getWriter();
-    读取器 = 探子窝点.readable.getReader();
-    const 编码器 = new TextEncoder();
+    await สายลับซอกเก็ต.opened;
+    writer = สายลับซอกเก็ต.writable.getWriter();
+    reader = สายลับซอกเก็ต.readable.getReader();
+    const encoder = new TextEncoder();
 
-    // SOCKS5 匪帮规矩
-    const 规矩们 = new Uint8Array([5, 2, 0, 2]);
-    await 写入器.write(规矩们);
-    const 规矩回应 = (await 读取器.read()).value;
+    // SOCKS5 การเจรจา
+    const วิธีการตรวจสอบ = new Uint8Array([5, 2, 0, 2]);
+    await writer.write(วิธีการตรวจสอบ);
+    const การตอบกลับ = (await reader.read()).value;
 
-    if (!规矩回应 || 规矩回应.length < 2) {
-      throw new Error('SOCKS5 匪帮规矩回应不对。');
+    if (!การตอบกลับ || การตอบกลับ.length < 2) {
+      throw new Error('การตอบกลับการเจรจา SOCKS5 ไม่ถูกต้อง');
     }
 
-    if (规矩回应[1] === 0x02) {
-      if (!匪号 || !密码) {
-        throw new Error(`探子窝点需要暗号，但没配置。`);
+    if (การตอบกลับ[1] === 0x02) {
+      if (!ชื่อ || !รหัส) {
+        throw new Error(`สายลับ SOCKS5 ต้องการการยืนยันตัวตน แต่ไม่ได้ตั้งค่าไว้`);
       }
-      const 认证包裹 = new Uint8Array([1, 匪号.length, ...编码器.encode(匪号), 密码.length, ...编码器.encode(密码)]);
-      await 写入器.write(认证包裹);
-      const 认证结果 = (await 读取器.read()).value;
-      if (!认证结果 || 认证结果.length < 2 || 认证结果[0] !== 0x01 || 认证结果[1] !== 0x00) {
-        throw new Error(`SOCKS5 匪号/密码不对或认证失败。`);
+      const แพ็คเก็ตการตรวจสอบ = new Uint8Array([1, ชื่อ.length, ...encoder.encode(ชื่อ), รหัส.length, ...encoder.encode(รหัส)]);
+      await writer.write(แพ็คเก็ตการตรวจสอบ);
+      const ผลลัพธ์การตรวจสอบ = (await reader.read()).value;
+      if (!ผลลัพธ์การตรวจสอบ || ผลลัพธ์การตรวจสอบ.length < 2 || ผลลัพธ์การตรวจสอบ[0] !== 0x01 || ผลลัพธ์การตรวจสอบ[1] !== 0x00) {
+        throw new Error(`รหัส SOCKS5/รหัสผ่านไม่ถูกต้องหรือการตรวจสอบล้มเหลว`);
       }
-    } else if (规矩回应[1] === 0x00) {
-      // 不需要暗号
+    } else if (การตอบกลับ[1] === 0x00) {
+      // ไม่ต้องการการตรวจสอบ
     } else {
-      throw new Error(`不支持的 SOCKS5 匪帮规矩: ${规矩回应[1]}`);
+      throw new Error(`ไม่รองรับวิธีการตรวจสอบ SOCKS5: ${การตอบกลับ[1]}`);
     }
 
-    // SOCKS5 接头
-    let 目标地址字节们;
-    switch (地址类型) {
+    // SOCKS5 เชื่อมต่อไปยังเป้าหมาย
+    let ไบต์ที่อยู่เป้าหมาย;
+    switch (ประเภทที่อยู่) {
       case 1: // IPv4
-        目标地址字节们 = new Uint8Array([1, ...目标地址.split('.').map(Number)]);
+        ไบต์ที่อยู่เป้าหมาย = new Uint8Array([1, ...ที่อยู่เป้าหมาย.split('.').map(Number)]);
         break;
-      case 2: // 域名
-        目标地址字节们 = new Uint8Array([3, 目标地址.length, ...编码器.encode(目标地址)]);
+      case 2: // โดเมน
+        ไบต์ที่อยู่เป้าหมาย = new Uint8Array([3, ที่อยู่เป้าหมาย.length, ...encoder.encode(ที่อยู่เป้าหมาย)]);
         break;
       case 3: // IPv6
-        const ipv6部分 = 目标地址.split(':');
-        const ipv6字节们 = [];
-        let 双冒号已处理 = false;
-        for (let i = 0; i < ipv6部分.length; i++) {
-          let part = ipv6部分[i];
+        const ส่วนของipv6 = ที่อยู่เป้าหมาย.split(':');
+        const ไบต์ipv6 = [];
+        let จัดการเครื่องหมาย :: แล้ว = false;
+        for (let i = 0; i < ส่วนของipv6.length; i++) {
+          let part = ส่วนของipv6[i];
           if (part === '') {
-            if (!双冒号已处理) {
-              let 缺失部分 = 8 - (ipv6部分.length - 1);
-              if (ipv6部分[0] === '' && i === 0) 缺失部分++;
-              if (ipv6部分[ipv6部分.length - 1] === '' && i === ipv6部分.length - 1) 缺失部分++;
-              for (let j = 0; j < 缺失部分; j++) {
-                ipv6字节们.push(0x00, 0x00);
+            if (!จัดการเครื่องหมาย :: แล้ว) {
+              let จำนวนส่วนที่หายไป = 8 - (ส่วนของipv6.length - 1);
+              if (ส่วนของipv6[0] === '' && i === 0) จำนวนส่วนที่หายไป++;
+              if (ส่วนของipv6[ส่วนของipv6.length - 1] === '' && i === ส่วนของipv6.length - 1) จำนวนส่วนที่หายไป++;
+              for (let j = 0; j < จำนวนส่วนที่หายไป; j++) {
+                ไบต์ipv6.push(0x00, 0x00);
               }
-              双冒号已处理 = true;
+              จัดการเครื่องหมาย :: แล้ว = true;
             }
           } else {
             let val = parseInt(part, 16);
-            ipv6字节们.push((val >> 8) & 0xFF, val & 0xFF);
+            ไบต์ipv6.push((val >> 8) & 0xFF, val & 0xFF);
           }
         }
-        while (ipv6字节们.length < 16) {
-            ipv6字节们.push(0x00, 0x00);
+        while (ไบต์ipv6.length < 16) {
+            ไบต์ipv6.push(0x00, 0x00);
         }
-        目标地址字节们 = new Uint8Array([4, ...ipv6字节们]);
+        ไบต์ที่อยู่เป้าหมาย = new Uint8Array([4, ...ไบต์ipv6]);
         break;
       default:
-        throw new Error('无效的 SOCKS5 目标地址类型');
+        throw new Error('ประเภทที่อยู่เป้าหมาย SOCKS5 ไม่ถูกต้อง');
     }
 
-    const 连接包裹 = new Uint8Array([5, 1, 0, ...目标地址字节们, 目标端口 >> 8, 目标端口 & 0xff]);
-    await 写入器.write(连接包裹);
-    const 连接回应 = (await 读取器.read()).value;
+    const แพ็คเก็ตเชื่อมต่อ = new Uint8Array([5, 1, 0, ...ไบต์ที่อยู่เป้าหมาย, พอร์ตเป้าหมาย >> 8, พอร์ตเป้าหมาย & 0xff]);
+    await writer.write(แพ็คเก็ตเชื่อมต่อ);
+    const การตอบกลับการเชื่อมต่อ = (await reader.read()).value;
 
-    if (!连接回应 || 连接回应.length < 2 || 连接回应[0] !== 0x05 || 连接回应[1] !== 0x00) {
-      throw new Error(`SOCKS5 目标接头失败。目标: ${目标地址}:${目标端口}, SOCKS5 回应码: ${连接回应 ? 连接回应[1] : '无回应'}`);
+    if (!การตอบกลับการเชื่อมต่อ || การตอบกลับการเชื่อมต่อ.length < 2 || การตอบกลับการเชื่อมต่อ[0] !== 0x05 || การตอบกลับการเชื่อมต่อ[1] !== 0x00) {
+      throw new Error(`การเชื่อมต่อเป้าหมาย SOCKS5 ล้มเหลว เป้าหมาย: ${ที่อยู่เป้าหมาย}:${พอร์ตเป้าหมาย}, รหัสตอบกลับ SOCKS5: ${การตอบกลับการเชื่อมต่อ ? การตอบกลับการเชื่อมต่อ[1] : 'ไม่มีการตอบกลับ'}`);
     }
 
-    写入器.releaseLock();
-    读取器.releaseLock();
-    return 探子窝点;
+    writer.releaseLock();
+    reader.releaseLock();
+    return สายลับซอกเก็ต;
   } catch (e) {
-    if (写入器) 写入器.releaseLock();
-    if (读取器) 读取器.releaseLock();
-    if (探子窝点) 探子窝点.close();
+    if (writer) writer.releaseLock();
+    if (reader) reader.releaseLock();
+    if (สายลับซอกเก็ต) สายลับซอกเก็ต.close();
     throw e;
   }
 }
 
-async function 接通水管(ws, tcp, 初始数据) {
-  // 发送匪帮接头成功的回应
+async function ส่งข้อมูล(ws, tcp, ข้อมูลเริ่มต้น) {
+  // ส่งการตอบกลับการเชื่อมต่อลับ
   ws.send(new Uint8Array([0, 0]));
 
-  const 写入器 = tcp.writable.getWriter();
-  const 读取器 = tcp.readable.getReader();
+  const writer = tcp.writable.getWriter();
+  const reader = tcp.readable.getReader();
 
-  // 写入匪帮客人发来的初始数据
-  if (初始数据 && 初始数据.byteLength > 0) {
-    await 写入器.write(初始数据).catch(err => console.error("写入初始数据到接头管子失败:", err));
+  // เขียนข้อมูลเริ่มต้นจากลูกค้า
+  if (ข้อมูลเริ่มต้น && ข้อมูลเริ่มต้น.byteLength > 0) {
+    await writer.write(ข้อมูลเริ่มต้น).catch(err => console.error("เขียนข้อมูลเริ่มต้นไปยัง TCP ล้มเหลว:", err));
   }
 
-  // 寻常路人到接头管子 (WebSocket to TCP)
+  // การถ่ายโอนข้อมูลจาก WebSocket ไปยัง TCP
   ws.addEventListener('message', async e => {
     if (e.data instanceof ArrayBuffer) {
       try {
-        await 写入器.write(e.data);
+        await writer.write(e.data);
       } catch (err) {
-        console.error("从寻常路人写入到接头管子失败:", err);
+        console.error("เขียนจาก WebSocket ไปยัง TCP ล้มเหลว:", err);
       }
     } else {
-      console.warn("收到非二进制数据 (寻常路人):", e.data);
+      console.warn("ได้รับข้อมูลที่ไม่ใช่ ArrayBuffer (WebSocket):", e.data);
     }
   });
 
-  // 接头管子到寻常路人 (TCP to WebSocket)
+  // การถ่ายโอนข้อมูลจาก TCP ไปยัง WebSocket
   try {
     while (true) {
-      const { value, done } = await 读取器.read();
+      const { value, done } = await reader.read();
       if (done) break;
       if (value) {
         try {
           ws.send(value);
-        } catch (发送错误) {
-          console.error("从接头管子发送数据到寻常路人失败:", 发送错误);
+        } catch (sendErr) {
+          console.error("ส่งข้อมูลจาก TCP ไปยัง WebSocket ล้มเหลว:", sendErr);
           break;
         }
       }
     }
-  } catch (读取错误) {
-    console.error("从接头管子读取数据失败:", 读取错误);
+  } catch (readErr) {
+    console.error("อ่านข้อมูลจาก TCP ล้มเหลว:", readErr);
   } finally {
-    try { ws.close(); } catch (e) { console.warn("关闭寻常路人失败:", e); }
-    try { 读取器.cancel(); } catch (e) { console.warn("取消接头管子读取失败:", e); }
-    try { 写入器.releaseLock(); } catch (e) { console.warn("释放接头管子写入锁失败:", e); }
-    try { tcp.close(); } catch (e) { console.warn("关闭接头管子失败:", e); }
-    console.log("水管接头已关闭。");
+    try { ws.close(); } catch (e) { console.warn("ปิด WebSocket ล้มเหลว:", e); }
+    try { reader.cancel(); } catch (e) { console.warn("ยกเลิกการอ่าน TCP ล้มเหลว:", e); }
+    try { writer.releaseLock(); } catch (e) { console.warn("ปล่อยล็อคการเขียน TCP ล้มเหลว:", e); }
+    try { tcp.close(); } catch (e) { console.warn("ปิดการเชื่อมต่อ TCP ล้มเหลว:", e); }
+    console.log("ท่อการถ่ายโอนปิดแล้ว");
   }
 }
 
-function 获取匪帮暗号(数组) {
-  const hex = Array.from(数组, v => v.toString(16).padStart(2, '0')).join('');
+function รับรหัสลับใหญ่(อาร์เรย์) {
+  const hex = Array.from(อาร์เรย์, v => v.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
 }
 
-async function 找到最快的窝点(域名) {
-  const 制造联络请求 = (类型) =>
-    探子联络点.map(联络点 =>
-      fetch(`${联络点}?name=${域名}&type=${类型}`, {
+async function หารังที่เร็วที่สุด(โดเมน) {
+  const สร้างคำขอติดต่อ = (ประเภท) =>
+    จุดติดต่อสายลับ.map(url =>
+      fetch(`${url}?name=${โดเมน}&type=${ประเภท}`, {
         headers: { 'Accept': 'application/dns-json' }
       }).then(res => res.json())
         .then(json => {
-          const 窝点 = json.Answer?.find(r => r.type === (类型 === 'A' ? 1 : 28))?.data;
-          if (窝点) return 窝点;
-          return Promise.reject(`没有 ${类型} 记录`);
+          const ที่อยู่ = json.Answer?.find(r => r.type === (ประเภท === 'A' ? 1 : 28))?.data;
+          if (ที่อยู่) return ที่อยู่;
+          return Promise.reject(`ไม่มีบันทึก ${ประเภท}`);
         })
-        .catch(err => Promise.reject(`${联络点} ${类型} 联络失败: ${err}`))
+        .catch(err => Promise.reject(`${url} ${ประเภท} คำขอล้มเหลว: ${err}`))
     );
   try {
-    return await Promise.any(制造联络请求('A'));
+    return await Promise.any(สร้างคำขอติดต่อ('A'));
   } catch (e) {
     try {
-      return await Promise.any(制造联络请求('AAAA'));
+      return await Promise.any(สร้างคำขอติดต่อ('AAAA'));
     } catch (e2) {
-      console.warn(`联络 ${域名} 失败 (IPv4和IPv6都失败了): ${e2.message}`);
-      return 域名;
+      console.warn(`คำขอ DOH สำหรับ ${โดเมน} ล้มเหลว (ทั้ง IPv4 และ IPv6): ${e2.message}`);
+      return โดเมน;
     }
   }
 }
 
-function 解析探子地址(地址字符串) {
-  const at索引 = 地址字符串.lastIndexOf("@");
-  if (at索引 === -1) {
-    const [窝点, 端口] = 解析窝点和端口(地址字符串);
-    return { 匪号: '', 密码: '', 窝点, 端口 };
+function แยกแยะที่อยู่สายลับ(สตริงที่อยู่) {
+  const atIndex = สตริงที่อยู่.lastIndexOf("@");
+  if (atIndex === -1) {
+    const [รัง, พอร์ต] = แยกแยะรังและพอร์ต(สตริงที่อยู่);
+    return { ชื่อ: '', รหัส: '', รัง, พอร์ต };
   }
-  const 认证部分 = 地址字符串.slice(0, at索引);
-  const 窝点部分 = 地址字符串.slice(at索引 + 1);
-  const 认证部分的最后一个冒号 = 认证部分.lastIndexOf(":");
-  const 匪号 = 认证部分的最后一个冒号 > -1 ? 认证部分.slice(0, 认证部分的最后一个冒号) : '';
-  const 密码 = 认证部分的最后一个冒号 > -1 ? 认证部分.slice(认证部分的最后一个冒号 + 1) : '';
-  const [窝点, 端口] = 解析窝点和端口(窝点部分);
-  return { 匪号, 密码, 窝点, 端口 };
+  const ส่วนการตรวจสอบ = สตริงที่อยู่.slice(0, atIndex);
+  const ส่วนของรัง = สตริงที่อยู่.slice(atIndex + 1);
+  const โคลอนสุดท้ายในส่วนการตรวจสอบ = ส่วนการตรวจสอบ.lastIndexOf(":");
+  const ชื่อ = โคลอนสุดท้ายในส่วนการตรวจสอบ > -1 ? ส่วนการตรวจสอบ.slice(0, โคลอนสุดท้ายในส่วนการตรวจสอบ) : '';
+  const รหัส = โคลอนสุดท้ายในส่วนการตรวจสอบ > -1 ? ส่วนการตรวจสอบ.slice(โคลอนสุดท้ายในส่วนการตรวจสอบ + 1) : '';
+  const [รัง, พอร์ต] = แยกแยะรังและพอร์ต(ส่วนของรัง);
+  return { ชื่อ, รหัส, รัง, พอร์ต };
 }
 
-function 解析窝点和端口(窝点部分) {
-  let 窝点, 端口;
-  if (窝点部分.startsWith('[')) {
-    const 结束括号 = 窝点部分.indexOf(']');
-    if (结束括号 === -1) throw new Error('无效的IPv6地址格式');
-    窝点 = 窝点部分.slice(1, 结束括号);
-    const 端口字符串 = 窝点部分.slice(结束括号 + 1);
-    端口 = 端口字符串.startsWith(':') ? Number(端口字符串.slice(1)) : 443;
-    if (isNaN(端口) || 端口 <= 0 || 端口 > 65535) 端口 = 443;
+function แยกแยะรังและพอร์ต(ส่วนของรัง) {
+  let รัง, พอร์ต;
+  if (ส่วนของรัง.startsWith('[')) {
+    const วงเล็บปิด = ส่วนของรัง.indexOf(']');
+    if (วงเล็บปิด === -1) throw new Error('รูปแบบที่อยู่ IPv6 ไม่ถูกต้อง');
+    รัง = ส่วนของรัง.slice(1, วงเล็บปิด);
+    const สตริงพอร์ต = ส่วนของรัง.slice(วงเล็บปิด + 1);
+    พอร์ต = สตริงพอร์ต.startsWith(':') ? Number(สตริงพอร์ต.slice(1)) : 443;
+    if (isNaN(พอร์ต) || พอร์ต <= 0 || พอร์ต > 65535) พอร์ต = 443;
   } else {
-    const 最后一个冒号 = 窝点部分.lastIndexOf(':');
-    if (最后一个冒号 > -1 && !isNaN(Number(窝点部分.slice(最后一个冒号 + 1)))) {
-      窝点 = 窝点部分.slice(0, 最后一个冒号);
-      端口 = Number(窝点部分.slice(最后一个冒号 + 1));
+    const โคลอนสุดท้าย = ส่วนของรัง.lastIndexOf(':');
+    if (โคลอนสุดท้าย > -1 && !isNaN(Number(ส่วนของรัง.slice(โคลอนสุดท้าย + 1)))) {
+      รัง = ส่วนของรัง.slice(0, โคลอนสุดท้าย);
+      พอร์ต = Number(ส่วนของรัง.slice(โคลอนสุดท้าย + 1));
     } else {
-      窝点 = 窝点部分;
-      端口 = 443;
+      รัง = ส่วนของรัง;
+      พอร์ต = 443;
     }
   }
-  return [窝点, 端口];
+  return [รัง, พอร์ต];
 }
 
-function 生成订阅页面(id, host) {
+function สร้างหน้าแผนที่(id, host) {
   return `
-1、本worker的私钥功能只支持通用订阅，其他请关闭私钥功能
-2、其他需求自行研究
-通用的：https${接头口令}${host}/${id}/${客栈暗号}${接头后缀}
+1.ฟังก์ชันของวิเศษของ worker นี้รองรับเฉพาะการสมัครใช้งานทั่วไปเท่านั้น โปรดปิดฟังก์ชันของวิเศษสำหรับคนอื่น
+2.ความต้องการอื่นๆ โปรดศึกษาด้วยตนเอง
+สำหรับลูกค้าทั่วไป: https${คำสั่งเชื่อมต่อ}${host}/${id}/${รหัสเส้นทาง}${รหัสส่วนท้าย}
 `;
 }
 
-function 生成配置文件(host) {
-  const 我优选的为空 = 优选据点们.length === 0 || (优选据点们.length === 1 && 优选据点们[0] === '');
-  const 我优选的TXT为空 = 优选据点名单.length === 0 || (优选据点名单.length === 1 && 优选据点名单[0] === '');
-  const 有用的优选据点们 = (!我优选的为空 || !我优选的TXT为空) ? 优选据点们 : [`${host}:443#备用节点`];
+function สร้างไฟล์การตั้งค่า(host) {
+  const รังที่ชอบของข้าว่างเปล่า = รังลับที่ชอบ.length === 0 || (รังลับที่ชอบ.length === 1 && รังลับที่ชอบ[0] === '');
+  const รายชื่อที่ชอบของข้าว่างเปล่า = รายชื่อรังลับที่ชอบ.length === 0 || (รายชื่อรังลับที่ชอบ.length === 1 && รายชื่อรังลับที่ชอบ[0] === '');
+  const รังลับที่ใช้ได้จริง = (!รังที่ชอบของข้าว่างเปล่า || !รายชื่อที่ชอบของข้าว่างเปล่า) ? รังลับที่ชอบ : [`${host}:443#รังสำรอง`];
 
-  if (启用信物) {
-    return `请先关闭私钥功能`;
+  if (เปิดใช้ของวิเศษ) {
+    return `โปรดปิดฟังก์ชันของวิเศษก่อน`;
   } else {
-    return 有用的优选据点们.map(item => {
+    return รังลับที่ใช้ได้จริง.map(item => {
       const parts = item.split("@");
       let mainPart = parts[0];
       let tlsOption = 'security=tls';
@@ -585,12 +585,12 @@ function 生成配置文件(host) {
           }
       }
 
-      const [addrPort, name = 我家寨名] = mainPart.split("#");
+      const [addrPort, name = ชื่อรังของข้า] = mainPart.split("#");
       const addrParts = addrPort.split(":");
       const port = addrParts.length > 1 && !isNaN(Number(addrParts[addrParts.length - 1])) ? Number(addrParts.pop()) : 443;
       const addr = addrParts.join(":");
 
-      return `${客栈暗号}${接头后缀}${接头口令}${匪帮暗号}@${addr}:${port}?encryption=none&${tlsOption}&sni=${host}&type=ws&host=${host}&path=%2F%3Ded%3D2560#${name}`;
+      return `${รหัสเส้นทาง}${รหัสส่วนท้าย}${คำสั่งเชื่อมต่อ}${รหัสลับใหญ่}@${addr}:${port}?encryption=none&${tlsOption}&sni=${host}&type=ws&host=${host}&path=%2F%3Ded%3D2560#${name}`;
     }).join("\n");
   }
-	  }
+			}
