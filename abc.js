@@ -1,636 +1,627 @@
-// 如需要使用环境变量,将120至126行取消注释
+// ====================================================================
+// Cloudflare Worker: VL over WebSocket + SOCKS5 (带并发SOCKS5代理选择)
+// --------------------------------------------------------------------
+
+// 环境变量 (Vars) 说明：
+//   UUID        必填，VL 用户的 UUID
+//   ID          可选，订阅路径 (默认 123456)
+//   SOCKS5_ADDRESS	可选 user:pass@127.0.0.1:1080 作为 SOCKS5_TXT_URL 加载失败时的备用
+//   SOCKS5_TXT_URL 可选 例如：https://example.com/socks5_list.txt
+//   SOCKS5_CONNECT_TIMEOUT = 5000; // SOCKS5 连接超时 (毫秒) 可选，SOCKS5 地址列表 TXT 文件的 URL
+//   SOCKS5_ENABLE 可选，true|false，true启用SOCKS5反代，false不启用 (默认 true)
+//   SOCKS5_GLOBAL 可选，true|false，true启用SOCKS5全局反代，false仅在直连失败时尝试 (默认 true)
+//   隐藏        可选，true|false，true 时订阅接口只返回嘲讽语.
+//   私钥        可选，用于 WS 连接认证的私钥
+//   私钥开关    可选，true|false，是否启用私钥认证
+//   嘲讽语      可选，隐藏订阅时返回的嘲讽语
+//
+// ====================================================================
 
 import { connect } from 'cloudflare:sockets';
 
-let subPath = 'nbx';     // 节点订阅路径,不修改将使用UUID作为订阅路径
-let proxyIP = '13.230.34.30';  // proxyIP 格式：ip、域名、ip:port、域名:port等,没填写port，默认使用443
-let password = '5dc15e15-f285-4a9d-959b-0e4fbdd77b63';  // 节点UUID
-let SSpath = '';          // 路径验证，如果为空则使用UUID作为验证路径
+let 转码 = 'vl', 转码2 = 'ess', 符号 = '://';
 
-// CF CDN 
-let cfip = [ // 格式:优选域名:端口#备注名称、优选IP:端口#备注名称、[ipv6优选]:端口#备注名称、优选域名#备注 
-    'mfa.gov.ua#SG', 'saas.sin.fan#JP', 'store.ubi.com#SG','cf.130519.xyz#KR','cf.008500.xyz#HK', 
-    'cf.090227.xyz#SG', 'cf.877774.xyz#HK','cdns.doon.eu.org#JP','sub.danfeng.eu.org#TW','cf.zhetengsha.eu.org#HK'
-];  // 在此感谢各位大佬维护的优选域名
+//////////////////////////////////////////////////////////////////////////配置区块////////////////////////////////////////////////////////////////////////
+let 哎呀呀这是我的ID啊 = "onlyno999"; // 订阅路径
+let 哎呀呀这是我的VL密钥 = "35dce6e6-1c37-4e8c-806b-5ef8affd9f55"; // UUID
 
-function closeSocketQuietly(socket) { 
-    try { 
-        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CLOSING) {
-            socket.close(); 
-        }
-    } catch (error) {} 
+let 私钥开关 = false;
+let 咦这是我的私钥哎 = "";
+
+let 隐藏订阅 = false; // 开启 true ━ 关闭false
+let 嘲讽语 = "哎呀你找到了我，但是我就是不给你看，气不气，嘿嘿嘿";
+
+let 我的优选 = ['cloudflare-ddns.zone.id:443#美国 域名 默认值 — Cloudflare CDN 节点']; // 可通过环境变量 IP 配置，也可以通过 TXT 配置
+let 我的优选TXT = ['']; // 可通过环境变量 TXT 配置，用于从远程文件加载优选 IP
+
+let 我的节点名字 = 'SOCKS5版';
+
+// 新增SOCKS5相关配置
+let 启用SOCKS5反代 = true; // 选择是否启用SOCKS5反代功能，true启用，false不启用，可以通过环境变量SOCKS5_ENABLE控制
+let 启用SOCKS5全局反代 = true; // 选择是否启用SOCKS5全局反代，启用后所有访问都是S5的落地，可以通过环境变量SOCKS5_GLOBAL控制
+let 我的SOCKS5账号 = ''; // 格式'账号:密码@地址:端口'，可以通过环境变量SOCKS5_ADDRESS控制
+
+// 新增：SOCKS5 地址列表 URL
+let SOCKS5地址列表URL = ''; // 可以通过环境变量 SOCKS5_TXT_URL 控制
+
+// SOCKS5 地址池和当前索引 (在并发模式下，索引更多用于初始加载后的顺序，实际连接由 Promise.any 管理)
+let SOCKS5地址池 = [];
+let SOCKS5地址列表上次更新时间 = 0;
+const SOCKS5地址列表刷新间隔 = 5 * 60 * 1000; // 5分钟刷新一次 (毫秒)
+const SOCKS5_CONNECT_TIMEOUT = 5000; // SOCKS5 连接超时 (毫秒)
+
+let DOH服务器列表 = [ //DOH地址，基本上已经涵盖市面上所有通用地址了，一般无需修改
+  "https://dns.google/dns-query",
+  "https://cloudflare-dns.com/dns-query",
+  "https://1.1.1.1/dns-query",
+  "https://dns.quad9.net/dns-query",
+];
+
+// --- 新增：伪装页面相关的变量和函数 ---
+let disguiseUrl = 'https://cf-worker-dir-bke.pages.dev/'; // 添加伪装页面的URL
+
+async function serveDisguisePage() {
+  try {
+    const res = await fetch(disguiseUrl, { cf: { cacheEverything: true } });
+    return new Response(res.body, res);
+  } catch {
+    return new Response(
+      `<!DOCTYPE html>
+       <html>
+         <head><title>Welcome</title></head>
+         <body><h1>Cloudflare Worker 已部署成功</h1>
+         <p>此页面为静态伪装页面（远程加载失败）。</p></body>
+       </html>`,
+      {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
+      }
+    );
+  }
 }
+// --- 结束新增 ---
 
-function base64ToArray(b64Str) {
-    if (!b64Str) return { error: null };
-    try { 
-        const binaryString = atob(b64Str.replace(/-/g, '+').replace(/_/g, '/'));
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-        }
-        return { earlyData: bytes.buffer, error: null }; 
-    } catch (error) { 
-        return { error }; 
+const 读取环境变量 = (name, fallback, env) => {
+  const raw = import.meta?.env?.[name] ?? env?.[name];
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed === 'true') return true;
+    if (trimmed === 'false') return false;
+    if (trimmed.includes('\n')) {
+      return trimmed.split('\n').map(item => item.trim()).filter(Boolean);
     }
-}
+    if (!isNaN(trimmed) && trimmed !== '') return Number(trimmed);
+    return trimmed;
+  }
+  return raw;
+};
 
-function parsePryAddress(serverStr) {
-    if (!serverStr) return null;
-    serverStr = serverStr.trim();
-    if (serverStr.startsWith('socks://') || serverStr.startsWith('socks5://')) {
-        const urlStr = serverStr.replace(/^socks:\/\//, 'socks5://');
-        try {
-            const url = new URL(urlStr);
-            return {
-                type: 'socks5',
-                host: url.hostname,
-                port: parseInt(url.port) || 1080,
-                username: url.username ? decodeURIComponent(url.username) : '',
-                password: url.password ? decodeURIComponent(url.password) : ''
-            };
-        } catch (e) {
-            return null;
-        }
-    }
-    
-    if (serverStr.startsWith('http://') || serverStr.startsWith('https://')) {
-        try {
-            const url = new URL(serverStr);
-            return {
-                type: 'http',
-                host: url.hostname,
-                port: parseInt(url.port) || (serverStr.startsWith('https://') ? 443 : 80),
-                username: url.username ? decodeURIComponent(url.username) : '',
-                password: url.password ? decodeURIComponent(url.password) : ''
-            };
-        } catch (e) {
-            return null;
-        }
-    }
-    
-    if (serverStr.startsWith('[')) {
-        const closeBracket = serverStr.indexOf(']');
-        if (closeBracket > 0) {
-            const host = serverStr.substring(1, closeBracket);
-            const rest = serverStr.substring(closeBracket + 1);
-            if (rest.startsWith(':')) {
-                const port = parseInt(rest.substring(1), 10);
-                if (!isNaN(port) && port > 0 && port <= 65535) {
-                    return { type: 'direct', host, port };
-                }
-            }
-            return { type: 'direct', host, port: 443 };
-        }
-    }
+// 新增：加载 SOCKS5 地址列表的函数
+async function 加载SOCKS5地址列表() {
+  if (!SOCKS5地址列表URL) {
+    console.log('SOCKS5_TXT_URL 未配置，不加载 SOCKS5 地址列表。');
+    return;
+  }
 
-    const lastColonIndex = serverStr.lastIndexOf(':');
-    
-    if (lastColonIndex > 0) {
-        const host = serverStr.substring(0, lastColonIndex);
-        const portStr = serverStr.substring(lastColonIndex + 1);
-        const port = parseInt(portStr, 10);
-        
-        if (!isNaN(port) && port > 0 && port <= 65535) {
-            return { type: 'direct', host, port };
-        }
-    }
-    
-    return { type: 'direct', host: serverStr, port: 443 };
-}
+  const currentTime = Date.now();
+  if (currentTime - SOCKS5地址列表上次更新时间 < SOCKS5地址列表刷新间隔 && SOCKS5地址池.length > 0) {
+    // 还没到刷新时间，且地址池不为空，则不刷新
+    return;
+  }
 
-function isSpeedTestSite(hostname) {
-    const speedTestDomains = ['speedtest.net','fast.com','speedtest.cn','speed.cloudflare.com', 'ovo.speedtestcustom.com'];
-    if (speedTestDomains.includes(hostname)) {
-        return true;
+  console.log('正在加载 SOCKS5 地址列表...');
+  try {
+    const response = await fetch(SOCKS5地址列表URL);
+    if (!response.ok) {
+      throw new Error(`无法加载 SOCKS5 地址列表: ${response.statusText} (Status: ${response.status})`);
     }
+    const text = await response.text();
+    // 过滤空行、只含空格的行和以 # 开头的注释行
+    const addresses = text.split('\n')
+                           .map(line => line.trim())
+                           .filter(line => line && !line.startsWith('#'));
 
-    for (const domain of speedTestDomains) {
-        if (hostname.endsWith('.' + domain) || hostname === domain) {
-            return true;
-        }
+    if (addresses.length > 0) {
+      SOCKS5地址池 = addresses;
+      SOCKS5地址列表上次更新时间 = currentTime;
+      console.log(`成功加载 ${SOCKS5地址池.length} 个 SOCKS5 地址。`);
+    } else {
+      console.warn('SOCKS5 地址列表文件为空或不含有效地址。将保留上次成功的列表（如果存在）。');
+      // 如果文件内容为空，不清空当前的 SOCKS5地址池，保留上次成功的
     }
-    return false;
+  } catch (e) {
+    console.error(`加载 SOCKS5 地址列表失败: ${e.message}。将使用备用 SOCKS5_ADDRESS (如果已配置) 或上次成功加载的列表。`);
+    // 即使加载失败，也保留旧的地址池，或者在地址池为空时，尝试 fallback 到 SOCKS5_ADDRESS
+  }
 }
 
 export default {
-    async fetch(request,env) {
-        try {
-            // workers 部署，需要环境变量，把下面5行前面的//去掉，取消注释即可使用对应的环境变量
-            // if (env.PROXYIP || env.proxyip || env.proxyIP) {
-            //     const servers = (env.PROXYIP || env.proxyip || env.proxyIP).split(',').map(s => s.trim());
-            //     proxyIP = servers[0]; 
-            // }
-            // password = env.PASSWORD || env.password || env.uuid || env.UUID || password;
-            // subPath = env.SUB_PATH || env.subpath || subPath;
-            // SSpath = env.SSPATH || env.sspath || sspath;
+  async fetch(访问请求, env) {
+    // 读取配置区块中的环境变量
+    哎呀呀这是我的ID啊 = 读取环境变量('ID', 哎呀呀这是我的ID啊, env);
+    哎呀呀这是我的VL密钥 = 读取环境变量('UUID', 哎呀呀这是我的VL密钥, env);
+    我的优选 = 读取环境变量('IP', 我的优选, env);
+    我的优选TXT = 读取环境变量('TXT', 我的优选TXT, env);
+    咦这是我的私钥哎 = 读取环境变量('私钥', 咦这是我的私钥哎, env);
+    隐藏订阅 = 读取环境变量('隐藏', 隐藏订阅, env);
+    私钥开关 = 读取环境变量('私钥开关', 私钥开关, env);
+    嘲讽语 = 读取环境变量('嘲讽语', 嘲讽语, env);
+    我的节点名字 = 读取环境变量('我的节点名字', 我的节点名字, env);
 
-            if (subPath === 'link' || subPath === '') {
-                subPath = password;
-            }
+    // 读取SOCKS5相关的环境变量
+    启用SOCKS5反代 = 读取环境变量('SOCKS5_ENABLE', 启用SOCKS5反代, env);
+    启用SOCKS5全局反代 = 读取环境变量('SOCKS5_GLOBAL', 启用SOCKS5全局反代, env);
+    我的SOCKS5账号 = 读取环境变量('SOCKS5_ADDRESS', 我的SOCKS5账号, env);
+    SOCKS5地址列表URL = 读取环境变量('SOCKS5_TXT_URL', SOCKS5地址列表URL, env); // 读取新的环境变量
 
-            if (SSpath === '') {
-                SSpath = password;
-            }
+    // 尝试加载 SOCKS5 地址列表
+    await 加载SOCKS5地址列表();
 
-            let validPath = `/${SSpath}`; 
-            const servers = proxyIP.split(',').map(s => s.trim());
-            proxyIP = servers[0]; 
+    const 升级标头 = 访问请求.headers.get('Upgrade');
+    const url = new URL(访问请求.url);
 
-            const method = 'none';
-            const url = new URL(request.url);
-            const pathname = url.pathname;
-        
-            let pathProxyIP = null;
-            if (pathname.startsWith('/proxyip=')) {
-                try {
-                    pathProxyIP = decodeURIComponent(pathname.substring(9)).trim();
-                } catch (e) {
-                    // 忽略错误
-                }
-
-                if (pathProxyIP && !request.headers.get('Upgrade')) {
-                    proxyIP = pathProxyIP;
-                    return new Response(`set proxyIP to: ${proxyIP}\n\n`, {
-                        headers: { 
-                            'Content-Type': 'text/plain; charset=utf-8',
-                            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-                        },
-                    });
-                }
-            }
-
-            if (request.headers.get('Upgrade') === 'websocket') {
-                if (!pathname.toLowerCase().startsWith(validPath.toLowerCase())) {
-                    return new Response('Unauthorized', { status: 401 });
-                }
-                
-                let wsPathProxyIP = null;
-                if (pathname.startsWith('/proxyip=')) {
-                    try {
-                        wsPathProxyIP = decodeURIComponent(pathname.substring(9)).trim();
-                    } catch (e) {
-                        // 忽略错误
-                    }
-                }
-                
-                const customProxyIP = wsPathProxyIP || url.searchParams.get('proxyip') || request.headers.get('proxyip');
-                return await handleSSRequest(request, customProxyIP);
-            } else if (request.method === 'GET') {
-                if (url.pathname === '/') {
-                    return getSimplePage(request);
-                }
-                
-                if (url.pathname.toLowerCase() === `/${password.toLowerCase()}`) {
-                    return getHomePage(request);
-                }
-                
-                // 订阅路径 /sub/UUID
-                if (url.pathname.toLowerCase() === `/sub/${subPath.toLowerCase()}` || url.pathname.toLowerCase() === `/sub/${subPath.toLowerCase()}/`) {
-                    const currentDomain = url.hostname;
-                    const ssHeader = 's'+'s';
-                    const ssLinks = cfip.map(cdnItem => {
-                        let host, port = 443, nodeName = '';
-                        if (cdnItem.includes('#')) {
-                            const parts = cdnItem.split('#');
-                            cdnItem = parts[0];
-                            nodeName = parts[1];
-                        }
-
-                        if (cdnItem.startsWith('[') && cdnItem.includes(']:')) {
-                            const ipv6End = cdnItem.indexOf(']:');
-                            host = cdnItem.substring(0, ipv6End + 1); 
-                            const portStr = cdnItem.substring(ipv6End + 2); 
-                            port = parseInt(portStr) || 443;
-                        } else if (cdnItem.includes(':')) {
-                            const parts = cdnItem.split(':');
-                            host = parts[0];
-                            port = parseInt(parts[1]) || 443;
-                        } else {
-                            host = cdnItem;
-                        }
-                        
-                        const ssConfig = `${method}:${password}@${host}:${port}`;
-                        const ssNodeName = nodeName ? `${nodeName}-${ssHeader}` : `${ssHeader}`;
-                        const encodedConfig = btoa(ssConfig);
-                        const v2rayPluginObj = {
-                            tls: true,
-                            mux: false,
-                            mode: "websocket",
-                            allowInsecure: true,
-                            host: currentDomain,
-                            peer: currentDomain,
-                            path: validPath + '/?ed=2560',
-                        };
-                        const v2rayPluginStr = JSON.stringify(v2rayPluginObj);
-                        const encodedV2rayPlugin = btoa(v2rayPluginStr).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-                        return `${ssHeader}://${encodedConfig}?v2ray-plugin=${encodedV2rayPlugin}#${ssNodeName}`;
-                    });
-                    
-                    const linksText = ssLinks.join('\n');
-                    const base64Content = btoa(unescape(encodeURIComponent(linksText)));
-                    return new Response(base64Content, {
-                        headers: { 
-                            'Content-Type': 'text/plain; charset=utf-8',
-                            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-                        },
-                    });
-                }
-            }
-            return new Response('Not Found', { status: 404 });
-        } catch (err) {
-            return new Response('Internal Server Error', { status: 500 });
+    if (!升级标头 || 升级标头 !== 'websocket') {
+      // 非 WebSocket 请求处理 (订阅、Hello World)
+      if (我的优选TXT) {
+        const 链接数组 = Array.isArray(我的优选TXT) ? 我的优选TXT : [我的优选TXT];
+        const 所有节点 = [];
+        for (const 链接 of 链接数组) {
+          try {
+            const 响应 = await fetch(链接);
+            const 文本 = await 响应.text();
+            const 节点 = 文本.split('\n').map(line => line.trim()).filter(line => line);
+            所有节点.push(...节点);
+          } catch (e) {
+            console.warn(`无法获取或解析优选链接: ${链接}`, e);
+          }
         }
-    },
+        if (所有节点.length > 0) 我的优选 = 所有节点;
+      }
+      switch (url.pathname) {
+        case '/': // 处理伪装页面
+          return serveDisguisePage(); // 返回伪装页面
+        case `/${哎呀呀这是我的ID啊}`: {
+          const sub = 给我订阅页面(哎呀呀这是我的ID啊, 访问请求.headers.get('Host'));
+          return new Response(sub, {
+            status: 200,
+            headers: { "Content-Type": "text/plain;charset=utf-8" }
+          });
+        }
+        case `/${哎呀呀这是我的ID啊}/${转码}${转码2}`: {
+          if (隐藏订阅) {
+            return new Response(嘲讽语, {
+              status: 200,
+              headers: { "Content-Type": "text/plain;charset=utf-8" }
+            });
+          } else {
+            const cfg = 给我通用配置文件(访问请求.headers.get('Host'));
+            return new Response(cfg, {
+              status: 200,
+              headers: { "Content-Type": "text/plain;charset=utf-8" }
+            });
+          }
+        }
+        default:
+          return new Response('Hello World!', { status: 200 }); // 或其他默认响应
+      }
+    } else {
+      // WebSocket 升级请求处理
+      if (私钥开关) {
+        const k = 访问请求.headers.get('my-key');
+        if (k !== 咦这是我的私钥哎) return new Response('私钥验证失败', { status: 403 });
+      }
+      const enc = 访问请求.headers.get('sec-websocket-protocol');
+      const data = 使用64位加解密(enc);
+      if (!私钥开关 && 验证VL的密钥(new Uint8Array(data.slice(1, 17))) !== 哎呀呀这是我的VL密钥) {
+        return new Response('无效的UUID', { status: 403 });
+      }
+      try {
+        const { tcpSocket, initialData } = await 解析VL标头(data);
+        return await 升级WS请求(访问请求, tcpSocket, initialData);
+      } catch (e) {
+        console.error("VL 协议解析或 TCP 连接失败:", e);
+        return new Response(`Bad Gateway: ${e.message}`, { status: 502 });
+      }
+    }
+  }
 };
 
-async function handleSSRequest(request, customProxyIP) {
-    const wssPair = new WebSocketPair();
-    const [clientSock, serverSock] = Object.values(wssPair);
-    serverSock.accept();
-    let remoteConnWrapper = { socket: null };
-    let isDnsQuery = false;
-    const earlyData = request.headers.get('sec-websocket-protocol') || '';
-    const readable = makeReadableStr(serverSock, earlyData);
-
-    readable.pipeTo(new WritableStream({
-        async write(chunk) {
-            if (isDnsQuery) return await forwardataudp(chunk, serverSock, null);
-            if (remoteConnWrapper.socket) {
-                const writer = remoteConnWrapper.socket.writable.getWriter();
-                await writer.write(chunk);
-                writer.releaseLock();
-                return;
-            }
-            
-            const { hasError, message, addressType, port, hostname, rawIndex } = parseSSPacketHeader(chunk);
-            if (hasError) throw new Error(message);
-
-            if (isSpeedTestSite(hostname)) {
-                throw new Error('Speedtest site is blocked');
-            }
-
-            if (addressType === 2) { 
-                if (port === 53) isDnsQuery = true;
-                else throw new Error('UDP is not supported');
-            }
-            
-            const rawData = chunk.slice(rawIndex);
-            if (isDnsQuery) return forwardataudp(rawData, serverSock, null);
-            await forwardataTCP(hostname, port, rawData, serverSock, null, remoteConnWrapper, customProxyIP);
-        },
-    })).catch((err) => {
-        // console.error('Readable pipe error:', err);
-    });
-
-    return new Response(null, { status: 101, webSocket: clientSock });
+async function 升级WS请求(访问请求, tcpSocket, initialData) {
+  const { 0: 客户端, 1: WS接口 } = new WebSocketPair();
+  WS接口.accept();
+  建立传输管道(WS接口, tcpSocket, initialData);
+  return new Response(null, { status: 101, webSocket: 客户端 });
 }
 
-function parseSSPacketHeader(chunk) {
-    if (chunk.byteLength < 7) return { hasError: true, message: 'Invalid data' };
-    
+function 使用64位加解密(str) {
+  str = str.replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(str), c => c.charCodeAt(0)).buffer;
+}
+
+async function 解析VL标头(buf) {
+  const b = new DataView(buf), c = new Uint8Array(buf);
+  const 获取数据定位 = c[17];
+  const 提取端口索引 = 18 + 获取数据定位 + 1;
+  const 访问端口 = b.getUint16(提取端口索引);
+  if (访问端口 === 53) throw new Error('拒绝DNS连接') // 避免直接DNS连接
+  const 提取地址索引 = 提取端口索引 + 2;
+  let 识别地址类型 = c[提取地址索引];
+  let 地址信息索引 = 提取地址索引 + 1;
+  let 访问地址;
+  let 地址长度;
+
+  switch (识别地址类型) {
+    case 1: // IPv4
+      地址长度 = 4;
+      访问地址 = Array.from(c.slice(地址信息索引, 地址信息索引 + 地址长度)).join('.');
+      break;
+    case 2: // 域名
+      地址长度 = c[地址信息索引];
+      地址信息索引 += 1;
+      const 访问域名 = new TextDecoder().decode(c.slice(地址信息索引, 地址信息索引 + 地址长度));
+      访问地址 = await 查询最快IP(访问域名); // 使用DOH查询IP
+      if (访问地址 !== 访问域名) {
+        // 更新地址类型，因为 DOH 可能将域名解析为 IPv6
+        识别地址类型 = 访问地址.includes(':') ? 3 : 1;
+      }
+      break;
+    case 3: // IPv6
+      地址长度 = 16;
+      const ipv6 = [];
+      const 读取IPV6地址 = new DataView(buf, 地址信息索引, 16);
+      for (let i = 0; i < 8; i++) ipv6.push(读取IPV6地址.getUint16(i * 2).toString(16));
+      访问地址 = ipv6.join(':');
+      break;
+    default:
+      throw new Error ('无效的访问地址类型');
+  }
+
+  const initialData = buf.slice(地址信息索引 + 地址长度);
+  let tcpSocket;
+
+  // SOCKS5 逻辑集成
+  if (启用SOCKS5反代) { // 检查是否启用 SOCKS5 反代
+    if (启用SOCKS5全局反代) { // 全局SOCKS5反代
+      tcpSocket = await 尝试创建SOCKS5接口(识别地址类型, 访问地址, 访问端口);
+    } else { // 非全局SOCKS5反代，仅当直连失败时尝试SOCKS5
+      try {
+        tcpSocket = connect({ hostname: 访问地址, port: 访问端口 });
+        await tcpSocket.opened;
+      } catch (e) {
+        console.warn(`直接连接目标 ${访问地址}:${访问端口} 失败，尝试通过SOCKS5代理: ${e.message}`);
+        tcpSocket = await 尝试创建SOCKS5接口(识别地址类型, 访问地址, 访问端口);
+      }
+    }
+  } else { // 不启用SOCKS5反代，直接连接
+    tcpSocket = connect({ hostname: 访问地址, port: 访问端口 });
+  }
+
+  // 确保 socket 已打开，否则会抛出错误
+  await tcpSocket.opened;
+  return { tcpSocket, initialData };
+}
+
+// 改进：尝试创建SOCKS5接口（并发模式，哪个快用哪个，自动跳过失败）
+async function 尝试创建SOCKS5接口(识别地址类型, 目标地址, 目标端口) {
+  let proxiesToTry = [];
+
+  // 首先，尝试从 SOCKS5地址池 获取代理
+  if (SOCKS5地址池.length > 0) {
+    proxiesToTry = [...SOCKS5地址池]; // 复制一份，避免修改原数组
+  }
+
+  // 如果 SOCKS5地址池 为空，但 我的SOCKS5账号 配置了，则将其作为备用
+  if (proxiesToTry.length === 0 && 我的SOCKS5账号) {
+    proxiesToTry.push(我的SOCKS5账号);
+  }
+
+  if (proxiesToTry.length === 0) {
+    throw new Error('未配置任何 SOCKS5 代理地址 (SOCKS5_TXT_URL 或 SOCKS5_ADDRESS)。');
+  }
+
+  const connectionPromises = proxiesToTry.map(async (proxyConfig, index) => {
+    let tcpSocket = null;
     try {
-        const view = new Uint8Array(chunk);
-        const addressType = view[0];
-        let addrIdx = 1, addrLen = 0, addrValIdx = addrIdx, hostname = '';
-        
-        switch (addressType) {
-            case 1: // IPv4
-                addrLen = 4; 
-                hostname = new Uint8Array(chunk.slice(addrValIdx, addrValIdx + addrLen)).join('.'); 
-                addrValIdx += addrLen;
-                break;
-            case 3: // Domain
-                addrLen = view[addrIdx];
-                addrValIdx += 1; 
-                hostname = new TextDecoder().decode(chunk.slice(addrValIdx, addrValIdx + addrLen)); 
-                addrValIdx += addrLen;
-                break;
-            case 4: // IPv6
-                addrLen = 16; 
-                const ipv6 = []; 
-                const ipv6View = new DataView(chunk.slice(addrValIdx, addrValIdx + addrLen)); 
-                for (let i = 0; i < 8; i++) ipv6.push(ipv6View.getUint16(i * 2).toString(16)); 
-                hostname = ipv6.join(':'); 
-                addrValIdx += addrLen;
-                break;
-            default: 
-                return { hasError: true, message: `Invalid address type: ${addressType}` };
-        }
-        
-        if (!hostname) return { hasError: true, message: `Invalid address: ${addressType}` };
-        
-        const port = new DataView(chunk.slice(addrValIdx, addrValIdx + 2)).getUint16(0);
-        return { hasError: false, addressType, port, hostname, rawIndex: addrValIdx + 2 };
+      const { 账号, 密码, 地址, 端口 } = await 获取SOCKS5账号(proxyConfig);
+      console.log(`正在并发尝试连接 SOCKS5 代理: ${账号 ? '带认证' : '无认证'} ${地址}:${端口} (代理 ${index + 1}/${proxiesToTry.length})`);
+
+      // 创建一个带超时的 Promise
+      const timeoutPromise = new Promise((resolve, reject) => {
+        const id = setTimeout(() => {
+          reject(new Error(`连接超时: ${地址}:${端口}`));
+        }, SOCKS5_CONNECT_TIMEOUT); // 使用配置的超时时间
+      });
+
+      // 竞速连接尝试和超时
+      tcpSocket = await Promise.race([
+        创建SOCKS5接口连接(账号, 密码, 地址, 端口, 识别地址类型, 目标地址, 目标端口),
+        timeoutPromise
+      ]);
+
+      console.log(`成功连接 SOCKS5 代理: ${地址}:${端口}`);
+      return { socket: tcpSocket, config: proxyConfig }; // 返回成功连接的 socket
     } catch (e) {
-        return { hasError: true, message: 'Failed to parse SS packet header' };
+      console.warn(`SOCKS5 代理连接失败或超时 (${proxyConfig}): ${e.message}`);
+      if (tcpSocket) {
+        try { tcpSocket.close(); } catch (closeErr) { console.warn("关闭失败连接时出错:", closeErr); }
+      }
+      return Promise.reject(new Error(`代理失败: ${proxyConfig} - ${e.message}`)); // 标记为拒绝，让 Promise.any 处理
     }
+  });
+
+  try {
+    const { socket, config } = await Promise.any(connectionPromises);
+    // 当 Promise.any 成功时，意味着至少一个代理连接成功
+    // 此时，Promise.any 会自动处理其他仍在进行的 Promise，不成功的会被抛弃
+    return socket;
+  } catch (aggregateError) {
+    // Promise.any 抛出 AggregateError，如果所有 Promise 都失败了
+    console.error(`所有 SOCKS5 代理尝试均失败:`, aggregateError.errors.map(e => e.message).join('; '));
+    throw new Error('所有 SOCKS5 代理尝试均失败。');
+  }
 }
 
-async function connect2Socks5(proxyConfig, targetHost, targetPort, initialData) {
-    const { host, port, username, password } = proxyConfig;
-    const socket = connect({ hostname: host, port: port });
-    const writer = socket.writable.getWriter();
-    const reader = socket.readable.getReader();
-    
-    try {
-        const authMethods = username && password ? 
-            new Uint8Array([0x05, 0x02, 0x00, 0x02]) :
-            new Uint8Array([0x05, 0x01, 0x00]); 
-        
-        await writer.write(authMethods);
-        const methodResponse = await reader.read();
-        if (methodResponse.done || methodResponse.value.byteLength < 2) {
-            throw new Error('S5 method selection failed');
-        }
-        
-        const selectedMethod = new Uint8Array(methodResponse.value)[1];
-        if (selectedMethod === 0x02) {
-            if (!username || !password) {
-                throw new Error('S5 requires authentication');
-            }
-            const userBytes = new TextEncoder().encode(username);
-            const passBytes = new TextEncoder().encode(password);
-            const authPacket = new Uint8Array(3 + userBytes.length + passBytes.length);
-            authPacket[0] = 0x01; 
-            authPacket[1] = userBytes.length;
-            authPacket.set(userBytes, 2);
-            authPacket[2 + userBytes.length] = passBytes.length;
-            authPacket.set(passBytes, 3 + userBytes.length);
-            await writer.write(authPacket);
-            const authResponse = await reader.read();
-            if (authResponse.done || new Uint8Array(authResponse.value)[1] !== 0x00) {
-                throw new Error('S5 authentication failed');
-            }
-        } else if (selectedMethod !== 0x00) {
-            throw new Error(`S5 unsupported auth method: ${selectedMethod}`);
-        }
-        
-        const hostBytes = new TextEncoder().encode(targetHost);
-        const connectPacket = new Uint8Array(7 + hostBytes.length);
-        connectPacket[0] = 0x05;
-        connectPacket[1] = 0x01;
-        connectPacket[2] = 0x00; 
-        connectPacket[3] = 0x03; 
-        connectPacket[4] = hostBytes.length;
-        connectPacket.set(hostBytes, 5);
-        new DataView(connectPacket.buffer).setUint16(5 + hostBytes.length, targetPort, false);
-        await writer.write(connectPacket);
-        const connectResponse = await reader.read();
-        if (connectResponse.done || new Uint8Array(connectResponse.value)[1] !== 0x00) {
-            throw new Error('S5 connection failed');
-        }
-        
-        await writer.write(initialData);
-        writer.releaseLock();
-        reader.releaseLock();
-        return socket;
-    } catch (error) {
-        writer.releaseLock();
-        reader.releaseLock();
-        throw error;
-    }
-}
+// 提取创建SOCKS5接口的核心逻辑到单独函数，方便复用
+async function 创建SOCKS5接口连接(账号, 密码, S5地址, S5端口, 识别地址类型, 访问地址, 访问端口) {
+  const SOCKS5接口 = connect({ hostname: S5地址, port: S5端口 });
+  let 传输数据, 读取数据;
+  try {
+    await SOCKS5接口.opened;
+    传输数据 = SOCKS5接口.writable.getWriter();
+    读取数据 = SOCKS5接口.readable.getReader();
+    const 转换数组 = new TextEncoder();
 
-async function connect2Http(proxyConfig, targetHost, targetPort, initialData) {
-    const { host, port, username, password } = proxyConfig;
-    const socket = connect({ hostname: host, port: port });
-    const writer = socket.writable.getWriter();
-    const reader = socket.readable.getReader();
-    try {
-        let connectRequest = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\n`;
-        connectRequest += `Host: ${targetHost}:${targetPort}\r\n`;
-        
-        if (username && password) {
-            const auth = btoa(`${username}:${password}`);
-            connectRequest += `Proxy-Authorization: Basic ${auth}\r\n`;
-        }
-        
-        connectRequest += `User-Agent: Mozilla/5.0\r\n`;
-        connectRequest += `Connection: keep-alive\r\n`;
-        connectRequest += '\r\n';
-        await writer.write(new TextEncoder().encode(connectRequest));
-        let responseBuffer = new Uint8Array(0);
-        let headerEndIndex = -1;
-        let bytesRead = 0;
-        const maxHeaderSize = 8192;
-        
-        while (headerEndIndex === -1 && bytesRead < maxHeaderSize) {
-            const { done, value } = await reader.read();
-            if (done) {
-                throw new Error('Connection closed before receiving HTTP response');
-            }
-            const newBuffer = new Uint8Array(responseBuffer.length + value.length);
-            newBuffer.set(responseBuffer);
-            newBuffer.set(value, responseBuffer.length);
-            responseBuffer = newBuffer;
-            bytesRead = responseBuffer.length;
-            
-            for (let i = 0; i < responseBuffer.length - 3; i++) {
-                if (responseBuffer[i] === 0x0d && responseBuffer[i + 1] === 0x0a &&
-                    responseBuffer[i + 2] === 0x0d && responseBuffer[i + 3] === 0x0a) {
-                    headerEndIndex = i + 4;
-                    break;
-                }
-            }
-        }
-        
-        if (headerEndIndex === -1) {
-            throw new Error('Invalid HTTP response');
-        }
-        
-        const headerText = new TextDecoder().decode(responseBuffer.slice(0, headerEndIndex));
-        const statusLine = headerText.split('\r\n')[0];
-        const statusMatch = statusLine.match(/HTTP\/\d\.\d\s+(\d+)/);
-        
-        if (!statusMatch) {
-            throw new Error(`Invalid response: ${statusLine}`);
-        }
-        
-        const statusCode = parseInt(statusMatch[1]);
-        if (statusCode < 200 || statusCode >= 300) {
-            throw new Error(`Connection failed: ${statusLine}`);
-        }
-        
-        console.log('HTTP connection established for Shadowsocks');
-        
-        await writer.write(initialData);
-        writer.releaseLock();
-        reader.releaseLock();
-        
-        return socket;
-    } catch (error) {
-        try { 
-            writer.releaseLock(); 
-        } catch (e) {}
-        try { 
-            reader.releaseLock(); 
-        } catch (e) {}
-        try { 
-            socket.close(); 
-        } catch (e) {}
-        throw error;
-    }
-}
+    // SOCKS5 认证协商
+    // Support no authentication (0x00) and username/password (0x02)
+    const 构建S5认证 = new Uint8Array([5, 2, 0, 2]);
+    await 传输数据.write(构建S5认证);
+    const 读取认证要求 = (await 读取数据.read()).value;
 
-async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnWrapper, customProxyIP) {
-    async function connectDirect(address, port, data) {
-        const remoteSock = connect({ hostname: address, port: port });
-        const writer = remoteSock.writable.getWriter();
-        await writer.write(data);
-        writer.releaseLock();
-        return remoteSock;
+    if (!读取认证要求 || 读取认证要求.length < 2) {
+      throw new Error('SOCKS5 认证协商响应无效。');
     }
-    
-    let proxyConfig = null;
-    let shouldUseProxy = false;
-    if (customProxyIP) {
-        proxyConfig = parsePryAddress(customProxyIP);
-        if (proxyConfig && (proxyConfig.type === 'socks5' || proxyConfig.type === 'http' || proxyConfig.type === 'https')) {
-            shouldUseProxy = true;
-        } else if (!proxyConfig) {
-            proxyConfig = parsePryAddress(proxyIP) || { type: 'direct', host: proxyIP, port: 443 };
-        }
+
+    if (读取认证要求[1] === 0x02) { // Username/Password authentication required
+      if (!账号 || !密码) {
+        throw new Error (`SOCKS5 代理需要认证，但未配置账号密码。`);
+      }
+      const 构建账号密码包 = new Uint8Array([ 1, 账号.length, ...转换数组.encode(账号), 密码.length, ...转换数组.encode(密码) ]);
+      await 传输数据.write(构建账号密码包);
+      const 读取账号密码认证结果 = (await 读取数据.read()).value;
+      if (!读取账号密码认证结果 || 读取账号密码认证结果.length < 2 || 读取账号密码认证结果[0] !== 0x01 || 读取账号密码认证结果[1] !== 0x00) {
+        throw new Error (`SOCKS5 账号密码错误或认证失败。`);
+      }
+    } else if (读取认证要求[1] === 0x00) { // No authentication required
+        // Do nothing, proceed to connection
     } else {
-        proxyConfig = parsePryAddress(proxyIP) || { type: 'direct', host: proxyIP, port: 443 };
-        if (proxyConfig.type === 'socks5' || proxyConfig.type === 'http' || proxyConfig.type === 'https') {
-            shouldUseProxy = true;
-        }
+        throw new Error (`SOCKS5 认证方式不支持: ${读取认证要求[1]}`);
     }
-    
-    async function connecttoPry() {
-        let newSocket;
-        if (proxyConfig.type === 'socks5') {
-            newSocket = await connect2Socks5(proxyConfig, host, portNum, rawData);
-        } else if (proxyConfig.type === 'http' || proxyConfig.type === 'https') {
-            newSocket = await connect2Http(proxyConfig, host, portNum, rawData);
-        } else {
-            newSocket = await connectDirect(proxyConfig.host, proxyConfig.port, rawData);
+
+    // SOCKS5 连接目标
+    let 转换访问地址;
+    switch (识别地址类型) {
+      case 1: // IPv4
+        转换访问地址 = new Uint8Array( [1, ...访问地址.split('.').map(Number)] );
+        break;
+      case 2: // 域名
+        转换访问地址 = new Uint8Array( [3, 访问地址.length, ...转换数组.encode(访问地址)] );
+        break;
+      case 3: // IPv6
+        const ipv6Parts = 访问地址.split(':');
+        const ipv6Bytes = [];
+        let doubleColonHandled = false;
+        for (let i = 0; i < ipv6Parts.length; i++) {
+          let part = ipv6Parts[i];
+          if (part === '') { // Handle ::
+            if (!doubleColonHandled) {
+              let numMissingParts = 8 - (ipv6Parts.length - 1);
+              if (ipv6Parts[0] === '' && i === 0) numMissingParts++; // e.g. ::1
+              if (ipv6Parts[ipv6Parts.length - 1] === '' && i === ipv6Parts.length - 1) numMissingParts++; // e.g. 1::
+
+              for (let j = 0; j < numMissingParts; j++) {
+                ipv6Bytes.push(0x00, 0x00);
+              }
+              doubleColonHandled = true;
+            }
+          } else {
+            let val = parseInt(part, 16);
+            ipv6Bytes.push((val >> 8) & 0xFF, val & 0xFF);
+          }
         }
-        
-        remoteConnWrapper.socket = newSocket;
-        newSocket.closed.catch(() => {}).finally(() => closeSocketQuietly(ws));
-        connectStreams(newSocket, ws, respHeader, null);
+        // If :: was at the end and no explicit parts followed, ensure 8 parts
+        while (ipv6Bytes.length < 16) {
+            ipv6Bytes.push(0x00, 0x00);
+        }
+        转换访问地址 = new Uint8Array( [4, ...ipv6Bytes] );
+        break;
+      default:
+        throw new Error ('无效的SOCKS5目标地址类型');
     }
-    
-    if (shouldUseProxy) {
-        try {
-            await connecttoPry();
-        } catch (err) {
-            throw err;
-        }
+
+    const 构建转换后的访问地址 = new Uint8Array([ 5, 1, 0, ...转换访问地址, 访问端口 >> 8, 访问端口 & 0xff ]);
+    await 传输数据.write(构建转换后的访问地址);
+    const 检查返回响应 = (await 读取数据.read()).value;
+
+    if (!检查返回响应 || 检查返回响应.length < 2 || 检查返回响应[0] !== 0x05 || 检查返回响应[1] !== 0x00) {
+      throw new Error (`SOCKS5目标地址连接失败，目标: ${访问地址}:${访问端口}, SOCKS5响应码: ${检查返回响应 ? 检查返回响应[1] : '无响应'}`);
+    }
+
+    传输数据.releaseLock();
+    读取数据.releaseLock();
+    return SOCKS5接口;
+  } catch (e) {
+    if (传输数据) 传输数据.releaseLock();
+    if (读取数据) 读取数据.releaseLock();
+    if (SOCKS5接口) SOCKS5接口.close();
+    // 抛出错误以便上层 (尝试创建SOCKS5接口) 捕获并跳过
+    throw e;
+  }
+}
+
+async function 建立传输管道(ws, tcp, init) {
+  // 发送 VL 握手成功的响应
+  ws.send(new Uint8Array([0, 0]));
+
+  const writer = tcp.writable.getWriter();
+  const reader = tcp.readable.getReader();
+
+  // 写入 VL 客户端的初始数据
+  if (init && init.byteLength > 0) {
+    await writer.write(init).catch(err => console.error("写入初始数据到 TCP 失败:", err));
+  }
+
+  // WebSocket 到 TCP 的数据传输
+  ws.addEventListener('message', async e => {
+    if (e.data instanceof ArrayBuffer) {
+      try {
+        await writer.write(e.data);
+      } catch (err) {
+        console.error("从 WebSocket 写入 TCP 失败:", err);
+        // 如果写入失败，可以考虑关闭 WS，但这里更倾向于让 TCP 的错误处理来结束连接
+      }
     } else {
-        try {
-            const initialSocket = await connectDirect(host, portNum, rawData);
-            remoteConnWrapper.socket = initialSocket;
-            connectStreams(initialSocket, ws, respHeader, connecttoPry);
-        } catch (err) {
-            await connecttoPry();
-        }
+      console.warn("收到非 ArrayBuffer 类型数据 (WebSocket):", e.data);
     }
-}
+  });
 
-function makeReadableStr(socket, earlyDataHeader) {
-    let cancelled = false;
-    return new ReadableStream({
-        start(controller) {
-            socket.addEventListener('message', (event) => { 
-                if (!cancelled) controller.enqueue(event.data); 
-            });
-            socket.addEventListener('close', () => { 
-                if (!cancelled) { 
-                    closeSocketQuietly(socket); 
-                    controller.close(); 
-                } 
-            });
-            socket.addEventListener('error', (err) => controller.error(err));
-            const { earlyData, error } = base64ToArray(earlyDataHeader);
-            if (error) controller.error(error); 
-            else if (earlyData) controller.enqueue(earlyData);
-        },
-        cancel() { 
-            cancelled = true; 
-            closeSocketQuietly(socket); 
+  // TCP 到 WebSocket 的数据传输
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break; // TCP 连接关闭
+      if (value) {
+        try {
+          ws.send(value);
+        } catch (sendErr) {
+          console.error("从 TCP 发送数据到 WebSocket 失败:", sendErr);
+          break; // 如果 WebSocket 发送失败，停止读取 TCP
         }
-    });
+      }
+    }
+  } catch (readErr) {
+    console.error("从 TCP 读取数据失败:", readErr);
+  } finally {
+    // 确保所有资源被关闭
+    try { ws.close(); } catch (e) { console.warn("关闭 WebSocket 失败:", e); }
+    try { reader.cancel(); } catch (e) { console.warn("取消 TCP 读取器失败:", e); }
+    try { writer.releaseLock(); } catch (e) { console.warn("释放 TCP 写入器锁失败:", e); }
+    try { tcp.close(); } catch (e) { console.warn("关闭 TCP 连接失败:", e); }
+    console.log("传输管道已关闭。");
+  }
 }
 
-async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
-    let header = headerData, hasData = false;
-    await remoteSocket.readable.pipeTo(
-        new WritableStream({
-            async write(chunk, controller) {
-                hasData = true;
-                if (webSocket.readyState !== WebSocket.OPEN) controller.error('ws.readyState is not open');
-                if (header) { 
-                    const response = new Uint8Array(header.length + chunk.byteLength);
-                    response.set(header, 0);
-                    response.set(chunk, header.length);
-                    webSocket.send(response.buffer); 
-                    header = null; 
-                } else { 
-                    webSocket.send(chunk); 
-                }
-            },
-            abort() {},
+function 验证VL的密钥(a) {
+  const hex = Array.from(a, v => v.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
+async function 获取SOCKS5账号(SOCKS5) {
+  const 分隔账号 = SOCKS5.lastIndexOf("@");
+  if (分隔账号 === -1) { // 如果没有账号密码，则直接是地址:端口
+    const [地址, 端口] = 解析地址端口(SOCKS5);
+    return { 账号: '', 密码: '', 地址, 端口 };
+  }
+  const 账号段 = SOCKS5.slice(0, 分隔账号);
+  const 地址段 = SOCKS5.slice(分隔账号 + 1);
+  const lastColonInAccount = 账号段.lastIndexOf(":");
+  const 账号 = lastColonInAccount > -1 ? 账号段.slice(0, lastColonInAccount) : '';
+  const 密码 = lastColonInAccount > -1 ? 账号段.slice(lastColonInAccount + 1) : '';
+  const [地址, 端口] = 解析地址端口(地址段);
+  return { 账号, 密码, 地址, 端口 };
+}
+
+function 解析地址端口(地址段) {
+  let 地址, 端口;
+  if (地址段.startsWith('[')) { // IPv6地址
+    const endBracket = 地址段.indexOf(']');
+    if (endBracket === -1) throw new Error('无效的 IPv6 地址格式');
+    地址 = 地址段.slice(1, endBracket);
+    // 检查是否有端口，例如 [::1]:8080
+    const portString = 地址段.slice(endBracket + 1);
+    端口 = portString.startsWith(':') ? Number(portString.slice(1)) : 443;
+    if (isNaN(端口) || 端口 <= 0 || 端口 > 65535) 端口 = 443; // 默认端口
+  } else { // IPv4或域名
+    const lastColon = 地址段.lastIndexOf(':');
+    if (lastColon > -1 && !isNaN(Number(地址段.slice(lastColon + 1)))) {
+      地址 = 地址段.slice(0, lastColon);
+      端口 = Number(地址段.slice(lastColon + 1));
+    } else {
+      地址 = 地址段;
+      端口 = 443; // 默认端口
+    }
+  }
+  return [地址, 端口];
+}
+
+async function 查询最快IP(访问域名) {
+  const 构造请求 = (type) =>
+    DOH服务器列表.map(DOH =>
+      fetch(`${DOH}?name=${访问域名}&type=${type}`, {
+        headers: { 'Accept': 'application/dns-json' }
+      }).then(res => res.json())
+        .then(json => {
+          // A 记录 type 1, AAAA 记录 type 28
+          const ip = json.Answer?.find(r => r.type === (type === 'A' ? 1 : 28))?.data;
+          if (ip) return ip;
+          return Promise.reject(`无 ${type} 记录`);
         })
-    ).catch((err) => { 
-        closeSocketQuietly(webSocket); 
-    });
-    if (!hasData && retryFunc) {
-        await retryFunc();
-    }
-}
-
-async function forwardataudp(udpChunk, webSocket, respHeader) {
+        .catch(err => Promise.reject(`${DOH} ${type} 请求失败: ${err}`))
+    );
+  try {
+    // 优先尝试获取 A 记录 (IPv4)
+    return await Promise.any(构造请求('A'));
+  } catch (e) {
+    // 如果 IPv4 失败，尝试获取 AAAA 记录 (IPv6)
     try {
-        const tcpSocket = connect({ hostname: '8.8.4.4', port: 53 });
-        let vlessHeader = respHeader;
-        const writer = tcpSocket.writable.getWriter();
-        await writer.write(udpChunk);
-        writer.releaseLock();
-        await tcpSocket.readable.pipeTo(new WritableStream({
-            async write(chunk) {
-                if (webSocket.readyState === WebSocket.OPEN) {
-                    if (vlessHeader) { 
-                        const response = new Uint8Array(vlessHeader.length + chunk.byteLength);
-                        response.set(vlessHeader, 0);
-                        response.set(chunk, vlessHeader.length);
-                        webSocket.send(response.buffer);
-                        vlessHeader = null; 
-                    } else { 
-                        webSocket.send(chunk); 
-                    }
-                }
-            },
-        }));
-    } catch (error) {
-        // console.error('UDP forward error:', error);
+      return await Promise.any(构造请求('AAAA'));
+    } catch (e2) {
+      console.warn(`DOH 查询 ${访问域名} 失败 (IPv4 和 IPv6): ${e2.message}`);
+      return 访问域名; // 所有 DOH 查询失败，返回原始域名
     }
+  }
 }
 
-function getHomePage(request) {
-    const url = request.headers.get('Host');
-    const baseUrl = `https://${url}`;
-    const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Shadowsocks Service</title><style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#7dd3ca 0%,#a17ec4 100%);height:100vh;display:flex;align-items:center;justify-content:center;color:#333;margin:0;padding:0;overflow:hidden;}.container{background:rgba(255,255,255,0.95);backdrop-filter:blur(10px);border-radius:20px;padding:20px;box-shadow:0 20px 40px rgba(0,0,0,0.1);max-width:800px;width:95%;text-align:center;}.logo{margin-bottom:20px;}.title{font-size:2rem;margin-bottom:10px;color:#2d3748;}.subtitle{color:#718096;margin-bottom:30px;font-size:1.1rem;}.info-card{background:#f7fafc;border-radius:12px;padding:20px;margin:20px 0;text-align:left;border-left:4px solid #6ed8c9;}.info-item{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #e2e8f0;}.info-item:last-child{border-bottom:none;}.label{font-weight:600;color:#4a5568;}.value{color:#2d3748;font-family:'Courier New',monospace;background:#edf2f7;padding:4px 8px;border-radius:4px;font-size:0.9rem;}.button-group{display:flex;gap:15px;justify-content:center;flex-wrap:wrap;margin:30px 0;}.btn{padding:12px 24px;background:linear-gradient(135deg,#12cd9e 0%,#a881d0 100%);color:white;border:none;border-radius:8px;font-size:1rem;font-weight:600;cursor:pointer;transition:all 0.3s ease;text-decoration:none;display:inline-block;}.btn:hover{transform:translateY(-2px);box-shadow:0 10px 20px rgba(0,0,0,0.1);}.footer{margin-top:30px;color:#ef0202;font-size:0.9rem;}@media (max-width:768px){.container{padding:20px;}.button-group{flex-direction:column;align-items:center;}.btn{width:100%;max-width:300px;}}</style></head><body><div class="container"><div class="logo"><img src="https://img.icons8.com/color/96/cloudflare.png" alt="Logo" width="96" height="96"></div><h1 class="title">Cloudflare Shadowsocks Service</h1><p class="subtitle">基于 Cloudflare 的高性能 Shadowsocks 代理服务</p><div class="info-card"><div class="info-item"><span class="label">服务状态</span><span class="value">运行中</span></div><div class="info-item"><span class="label">HOST地址</span><span class="value">${url}</span></div><div class="info-item"><span class="label">UUID</span><span class="value">${subPath}</span></div><div class="info-item"><span class="label">v2rayN/shadowrocket订阅地址</span><span class="value">${baseUrl}/sub/${subPath}</span></div></div><div class="footer"><p>注意：v2rayN导入的节点链接参数不完整,需要手动补全,节点path为：/${SSpath}/?ed=2560</p></div><div class="button-group"><button onclick="copySubscription()" class="btn">复制订阅链接</button><button onclick="showQRCode()" class="btn">显示订阅二维码</button></div><div class="footer"><p style="margin-top: 20px;"><a href="https://github.com/eooce/Cloudflare-proxy" target="_blank" style="color: #718096; text-decoration: none; margin: 0 10px;">GitHub项目</a><a href="https://check-proxyip.ssss.nyc.mn" target="_blank" style="color: #718096; text-decoration: none; margin: 0 10px;">Proxyip检测</a><a href="https://t.me/eooceu" target="_blank" style="color: #718096; text-decoration: none; margin: 0 10px;">Telegram交流群</a></p></div></div><div id="qrModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);z-index:1000;"><div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:white;padding:20px;border-radius:10px;text-align:center;"><h2>Shadowrocket订阅二维码</h2><img id="qrCodeImage" src="" alt="QR Code" style="max-width:300px;height:auto;padding:10px;"><p style="word-break:break-all;"><a id="qrCodeLink" href="" target="_blank"></a></p><button onclick="closeQRModal()" style="margin-top:20px;padding:10px 20px;background:#12cd9e;color:white;border:none;border-radius:5px;cursor:pointer;">关闭</button></div></div><script>function copySubscription(){const configUrl='${baseUrl}/sub/${subPath}';navigator.clipboard.writeText(configUrl).then(()=>{alert('订阅链接已复制到剪贴板!');}).catch(()=>{const textArea=document.createElement('textarea');textArea.value=configUrl;document.body.appendChild(textArea);textArea.select();document.execCommand('copy');document.body.removeChild(textArea);alert('订阅链接已复制到剪贴板!');});}function showQRCode(){const configUrl='${baseUrl}/sub/${subPath}';document.getElementById('qrCodeImage').src='';document.getElementById('qrCodeLink').href='';document.getElementById('qrCodeLink').textContent='二维码生成中...';document.getElementById('qrModal').style.display='block';const qrUrl='https://tool.oschina.net/action/qrcode/generate?data='+encodeURIComponent(configUrl)+'&output=image%2Fpng&error=L&type=0&margin=4&size=4';fetch(qrUrl).then(response=>response.blob()).then(blob=>{const imageUrl=URL.createObjectURL(blob);document.getElementById('qrCodeImage').src=imageUrl;document.getElementById('qrCodeLink').href=configUrl;document.getElementById('qrCodeLink').textContent=configUrl;}).catch(()=>{document.getElementById('qrCodeImage').src=qrUrl;document.getElementById('qrCodeLink').href=configUrl;document.getElementById('qrCodeLink').textContent=configUrl;});}function closeQRModal(){document.getElementById('qrModal').style.display='none';}</script></body></html>`;
-    return new Response(html, {
-        status: 200,
-        headers: {
-            'Content-Type': 'text/html;charset=utf-8',
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-        },
-    });
+function 给我订阅页面(ID, host) {
+  return `
+1、本worker的私钥功能只支持通用订阅，其他请关闭私钥功能
+2、其他需求自行研究
+通用的：https${符号}${host}/${ID}/${转码}${转码2}
+`;
 }
 
-function getSimplePage(request) {
-    const url = request.headers.get('Host');
-    const baseUrl = `https://${url}`;
-    const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Shadowsocks Cloudflare Service</title><style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#7dd3ca 0%,#a17ec4 100%);height:100vh;display:flex;align-items:center;justify-content:center;color:#333;margin:0;padding:0;overflow:hidden;}.container{background:rgba(255,255,255,0.95);backdrop-filter:blur(10px);border-radius:20px;padding:40px;box-shadow:0 20px 40px rgba(0,0,0,0.1);max-width:800px;width:95%;text-align:center;}.logo{margin-bottom:20px;}.title{font-size:2rem;margin-bottom:30px;color:#2d3748;}.tip-card{background:#fff3cd;border-radius:12px;padding:20px;margin:20px 0;text-align:center;border-left:4px solid #ffc107;}.tip-title{font-weight:600;color:#856404;margin-bottom:10px;}.tip-content{color:#856404;font-size:1rem;}.highlight{font-weight:bold;color:#000;background:#fff;padding:2px 6px;border-radius:4px;}@media (max-width:768px){.container{padding:20px;}}</style></head><body><div class="container"><div class="logo"><img src="https://img.icons8.com/color/96/cloudflare.png" alt="Logo" width="96" height="96"></div><h1 class="title">Hello shodowsocks！</h1><div class="tip-content">访问 <span class="highlight">${baseUrl}/你的UUID</span> 进入订阅中心</div></div></div></body></html>`;
-    return new Response(html, {
-        status: 200,
-        headers: {
-            'Content-Type': 'text/html;charset=utf-8',
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-        },
-    });
+function 给我通用配置文件(host) {
+  // 检查 我的优选 和 我的优选TXT 是否为空或只包含空字符串
+  const isMyPreferredEmpty = 我的优选.length === 0 || (我的优选.length === 1 && 我的优选[0] === '');
+  const isMyPreferredTxtEmpty = 我的优选TXT.length === 0 || (我的优选TXT.length === 1 && 我的优选TXT[0] === '');
+
+  // 如果 我的优选 和 我的优选TXT 都为空，则使用备用节点信息
+  const effectiveMyPreferred = (!isMyPreferredEmpty || !isMyPreferredTxtEmpty) ? 我的优选 : [`${host}:443#备用节点`];
+
+  if (私钥开关) {
+    return `请先关闭私钥功能`;
+  } else {
+    return effectiveMyPreferred.map(item => {
+      // 检查 item 是否包含 @ (tls 配置)
+      const parts = item.split("@");
+      let mainPart = parts[0];
+      let tlsOption = 'security=tls'; // 默认启用 TLS
+
+      if (parts.length > 1) {
+          // 如果有 @ 符号，则后面的部分可能是 tls 配置
+          const tlsConfig = parts[1];
+          if (tlsConfig.toLowerCase() === 'notls') {
+              tlsOption = 'security=none';
+          }
+          // 如果还有其他 tls 配置，可以在这里扩展解析
+      }
+
+      const [addrPort, name = 我的节点名字] = mainPart.split("#");
+      const addrParts = addrPort.split(":");
+      const port = addrParts.length > 1 && !isNaN(Number(addrParts[addrParts.length - 1])) ? Number(addrParts.pop()) : 443;
+      const addr = addrParts.join(":"); // 重新组合地址，处理 IPv6 带冒号的情况
+
+      return `${转码}${转码2}${符号}${哎呀呀这是我的VL密钥}@${addr}:${port}?encryption=none&${tlsOption}&sni=${host}&type=ws&host=${host}&path=%2F%3Fed%3D2560#${name}`;
+    }).join("\n");
+  }
 }
