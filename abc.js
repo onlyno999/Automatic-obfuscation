@@ -7,14 +7,31 @@ let yourUUID = '1f9d104e-ca0e-4202-ba4b-a0afb969c748';  // UUID
 let fakePage = 'https://cf-worker-dir-bke.pages.dev/';
 
 // CDN 
-let cfip = [ // 格式:优选域名:端口#备注名称、优选IP:端口#备注名称、[ipv6优选]:端口#备注名称、优选域名#备注 
+let cfip = [ 
     'mfa.gov.ua#SG', 'saas.sin.fan#HK', 'store.ubi.com#JP','cf.130519.xyz#KR','cf.008500.xyz#HK', 
     'cf.090227.xyz#SG', 'cf.877774.xyz#HK','cdns.doon.eu.org#JP','sub.danfeng.eu.org#TW','cf.zhetengsha.eu.org#HK'
-];  // 在此感谢各位大佬维护的优选域名
+]; 
 
-// 修改点：仅修改此函数，实现自动跳转
-function getHomePageHTML(currentDomain) {
-    return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${fakePage}"><title>Redirecting</title><script>window.location.href="${fakePage}";</script></head><body><p>Redirecting to official site...</p></body></html>`;
+// 修改点：改为服务端直接反代抓取内容，不再输出跳转代码
+async function handleHomePage(request) {
+    try {
+        const response = await fetch(fakePage, {
+            headers: {
+                'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+            },
+        });
+        
+        // 返回抓取到的页面内容，实现无缝伪装
+        return new Response(response.body, {
+            status: response.status,
+            headers: {
+                'Content-Type': response.headers.get('Content-Type') || 'text/html; charset=utf-8',
+                'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+            },
+        });
+    } catch (e) {
+        return new Response('Error loading fake page', { status: 500 });
+    }
 }
 
 function getSubPageHTML(currentDomain) {
@@ -23,17 +40,6 @@ function getSubPageHTML(currentDomain) {
     const singboxSubLink = `https://sublink.eooce.com/singbox?config=https://${currentDomain}/sub/${yourUUID}`;
     
     return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>订阅链接</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,sans-serif;background:linear-gradient(135deg,#667eea 0%,#18800e 100%);min-height:100vh;padding:20px}.container{max-width:900px;margin:0 auto;background:#fff;border-radius:15px;padding:30px;box-shadow:0 20px 60px rgba(0,0,0,.3)}h1{color:#667eea;margin-bottom:10px;font-size:2rem;text-align:center}.section{margin-bottom:25px}.section-title{color:#667eea;font-size:16px;font-weight:600;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid #667eea}.link-box{background:#f7f9fc;border:1px solid #e1e8ed;border-radius:8px;padding:12px;margin-bottom:10px}.link-label{font-size:16px;color:#666;margin-bottom:6px;font-weight:700}.link-content{display:flex;gap:8px}.link-text{flex:1;background:#fff;padding:8px 12px;border-radius:5px;border:1px solid #ddd;font-size:.8rem;word-break:break-all;font-family:monospace}.copy-btn{background:#667eea;color:#fff;border:none;padding:8px 16px;border-radius:5px;cursor:pointer;font-size:13px;white-space:nowrap}.copy-btn:hover{background:#5568d3}.copy-btn.copied{background:#48c774}.usage-section{background:#fff9e6;border-left:4px solid #ffc107;padding:15px;border-radius:5px;margin-top:25px}.usage-title{color:#f57c00;font-size:1.2rem;font-weight:600;margin-bottom:12px}.usage-item{margin-bottom:12px;font-size:13px;line-height:1.6}.usage-item strong{color:#333;display:block;margin-bottom:4px}.usage-item code{background:#fff;padding:2px 6px;border-radius:3px;color:#e91e63;font-size:13px;border:1px solid #ddd;word-wrap:break-word;word-break:break-all;display:inline-block;max-width:100%}.example{color:#666;font-size:14px;margin-left:8px}.footer{margin-top:30px;padding-top:20px;border-top:1px solid #e1e8ed;text-align:center;font-size:14px;color:#999}.footer a{color:#667eea;text-decoration:none;margin:0 10px}.footer a:hover{text-decoration:underline}@media (max-width:768px){.container{padding:20px}.link-content{flex-direction:column}.copy-btn{width:100%}}</style></head><body><div class="container"><h1>Snippets 订阅中心</h1><div class="section"><div class="section-title">🔗 通用订阅</div><div class="link-box"><div class="link-label">v2rayN / Loon / Shadowrocket / Karing</div><div class="link-content"><div class="link-text" id="v2ray-link">${v2raySubLink}</div><button class="copy-btn" onclick="copyToClipboard('v2ray-link',this)">复制</button></div></div></div><div class="section"><div class="section-title">😺 Clash 系列订阅</div><div class="link-box"><div class="link-label">Mihomo / FlClash / Clash Meta</div><div class="link-content"><div class="link-text" id="clash-link">${clashSubLink}</div><button class="copy-btn" onclick="copyToClipboard('clash-link',this)">复制</button></div></div></div><div class="section"><div class="section-title">📦 Sing-box 系列订阅</div><div class="link-box"><div class="link-label">Sing-box / SFI / SFA</div><div class="link-content"><div class="link-text" id="singbox-link">${singboxSubLink}</div><button class="copy-btn" onclick="copyToClipboard('singbox-link',this)">复制</button></div></div></div><div class="usage-section"><div class="usage-title">⚙️ 自定义路径(节点里的path)使用说明</div><div class="usage-item"><strong>1. 默认路径</strong><code>/?ed=2560</code><div class="example">使用代码里设置的默认proxyip</div></div><div class="usage-item"><strong>2. 带端口的proxyip</strong><code>/proxyip=210.61.97.241:81</code><br><code>/proxyip=proxy.xxxxxxxx.tk:50001</code><br><code>/?ed=2560&proxyip=210.61.97.241:81</code><br><code>/?ed=2560&proxyip=proxy.xxxxxxxx.tk:50001</code></div><div class="usage-item"><strong>3. 域名proxyip</strong><code>/proxyip=jp.yutian.nyc.mn</code><br><code>/?ed=2560&proxyip=jp.yutian.nyc.mn</code></div><div class="usage-item"><strong>4. 全局SOCKS5</strong><code>/proxyip=socks://user:password@host:port</code><br><code>/proxyip=socks5://user:password@host:port</code><br><code>/?ed=2560&proxyip=socks://user:password@host:port</code><br><code>/?ed=2560&proxyip=socks5://user:password@host:port</code></div><div class="usage-item"><strong>5. 全局HTTP/HTTPS</strong><code>/proxyip=http://user:password@host:port</code><br><code>/proxyip=https://user:password@host:port</code><br><code>/?ed=2560&proxyip=http://user:password@host:port</code><br><code>/?ed=2560&proxyip=https://user:password@host:port</code></div></div><div class="footer"><a href="https://github.com/eooce/CF-Workers-and-Snip-VLESS" target="_blank">GitHub 项目</a>|<a href="https://t.me/eooceu" target="_blank">Telegram 群组</a>|<a href="https://check-proxyip.ssss.nyc.mn" target="_blank">ProxyIP 检测服务</a></div></div><script>function copyToClipboard(e,t){const n=document.getElementById(e).textContent;navigator.clipboard&&navigator.clipboard.writeText?navigator.clipboard.writeText(n).then(()=>{showCopySuccess(t)}).catch(()=>{fallbackCopy(n,t)}):fallbackCopy(n,t)}function fallbackCopy(e,t){const n=document.createElement("textarea");n.value=e,n.style.position="fixed",n.style.left="-999999px",document.body.appendChild(n),n.select();try{document.execCommand("copy"),showCopySuccess(t)}catch(e){alert("复制失败，请手动复制")}document.body.removeChild(n)}function showCopySuccess(e){const t=e.textContent;e.textContent="已复制",e.classList.add("copied"),setTimeout(()=>{e.textContent=t,e.classList.remove("copied")},2e3)}</script></body></html>`;
-}
-
-async function handleHomePage(request) {
-    const url = new URL(request.url);
-    const currentDomain = url.hostname;
-    return new Response(getHomePageHTML(currentDomain), {
-        headers: { 
-            'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-        },
-    });
 }
 
 async function handleSubtionPage(request) {
@@ -161,7 +167,6 @@ export default {
                 try {
                     pathProxyIP = decodeURIComponent(pathname.substring(9)).trim();
                 } catch (e) {
-                    // 忽略错误
                 }
 
                 if (pathProxyIP && !request.headers.get('Upgrade')) {
@@ -181,7 +186,6 @@ export default {
                     try {
                         wsPathProxyIP = decodeURIComponent(pathname.substring(9)).trim();
                     } catch (e) {
-                        // 忽略错误
                     }
                 }
                 
@@ -354,7 +358,6 @@ async function connect2Socks5(proxyConfig, targetHost, targetPort, initialData) 
             try {
                 socket.close();
             } catch (e) {
-                // throw e;
             }
         }
         throw error;
@@ -445,12 +448,10 @@ async function connect2Http(proxyConfig, targetHost, targetPort, initialData) {
             throw error;
         }
     } catch (error) {
-        // 确保套接字被正确关闭
         if (socket) {
             try {
                 socket.close();
             } catch (e) {
-                // 忽略关闭错误
             }
         }
         throw error;
@@ -595,11 +596,9 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
             abort() {},
         })
     ).catch((err) => { 
-        console.error('Stream pipe error:', err);
         closeSocketQuietly(webSocket); 
     });
     if (!hasData && retryFunc) {
-        console.log('No data received, retrying...');
         await retryFunc();
     }
 }
@@ -627,6 +626,5 @@ async function forwardUDP(udpChunk, webSocket, respHeader) {
             },
         }));
     } catch (error) {
-        // console.error('UDP forward error:', error);
     }
 }
