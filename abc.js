@@ -3,14 +3,18 @@ import { connect } from 'cloudflare:sockets';
 let proxyIP = 'wok.woxxxxxx.nyc.mn';  // proxyIP
 let yourUUID = '1f9d104e-ca0e-4202-ba4b-a0afb969c748';  // UUID
 
+// 伪装页面地址
+let fakePage = 'https://cf-worker-dir-bke.pages.dev/';
+
 // CDN 
 let cfip = [ // 格式:优选域名:端口#备注名称、优选IP:端口#备注名称、[ipv6优选]:端口#备注名称、优选域名#备注 
     'mfa.gov.ua#SG', 'saas.sin.fan#HK', 'store.ubi.com#JP','cf.130519.xyz#KR','cf.008500.xyz#HK', 
     'cf.090227.xyz#SG', 'cf.877774.xyz#HK','cdns.doon.eu.org#JP','sub.danfeng.eu.org#TW','cf.zhetengsha.eu.org#HK'
 ];  // 在此感谢各位大佬维护的优选域名
 
+// 修改点：仅修改此函数，实现自动跳转
 function getHomePageHTML(currentDomain) {
-    return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Snippets</title><style>body{font-family:Arial,sans-serif;margin:0;padding:40px 20px;background:linear-gradient(135deg,#667eea 0%,#18800e 100%);min-height:100vh;display:flex;align-items:center;justify-content:center}.container{max-width:600px;background:#fff;padding:40px;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.3);text-align:center}h1{color:#667eea;margin-bottom:20px}.info{font-size:18px;color:#666;margin:20px 0}.link{display:inline-block;background:#667eea;color:#fff;padding:12px 30px;border-radius:5px;text-decoration:none;margin-top:20px}.link:hover{background:#5568d3}.footer{margin-top:30px;padding-top:20px;border-top:1px solid #eee;font-size:14px;color:#999}.footer a{color:#667eea;text-decoration:none;margin:0 10px}.footer a:hover{text-decoration:underline}</style></head><body><div class="container"><h1>Hello Snippets</h1><div class="info">请访问: <strong>https://${currentDomain}/你的UUID</strong><br><br>查看订阅和使用说明</div><div class="footer"><a href="https://github.com/eooce/CF-Workers-and-Snip-VLESS" target="_blank">GitHub</a>|<a href="https://t.me/eooceu" target="_blank">TG群组</a></div></div></body></html>`;
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${fakePage}"><title>Redirecting</title><script>window.location.href="${fakePage}";</script></head><body><p>Redirecting to official site...</p></body></html>`;
 }
 
 function getSubPageHTML(currentDomain) {
