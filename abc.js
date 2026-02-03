@@ -8,8 +8,7 @@ let fakePage = 'https://cf-worker-dir-bke.pages.dev/';
 
 // CDN 
 let cfip = [ 
-    'mfa.gov.ua#SG', 'saas.sin.fan#HK', 'store.ubi.com#JP','cf.130519.xyz#KR','cf.008500.xyz#HK', 
-    'cf.090227.xyz#SG', 'cf.877774.xyz#HK','cdns.doon.eu.org#JP','sub.danfeng.eu.org#TW','cf.zhetengsha.eu.org#HK'
+    'sjc.xxxxxxxx.nyc.mn#SJC', 'lax.xxxxxxxx.nyc.mn#LAX','nrt.xxxxxxxx.nyc.mn#JP','fra.xxxxxxxx.nyc.mn#DE'
 ]; 
 
 // 修改点：改为服务端直接反代抓取内容，不再输出跳转代码
@@ -605,7 +604,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
 
 async function forwardUDP(udpChunk, webSocket, respHeader) {
     try {
-        const tcpSocket = connect({ hostname: '8.8.4.4', port: 53 });
+        const tcpSocket = connect({ hostname: '8.8.8.8', port: 53 });
         let vlessHeader = respHeader;
         const writer = tcpSocket.writable.getWriter();
         await writer.write(udpChunk);
