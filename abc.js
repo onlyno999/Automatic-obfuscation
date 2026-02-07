@@ -8,7 +8,7 @@ let fakePage = 'https://cf.090227.xyz/';
 
 // CDN 
 let cfip = [ 
-    'sjc.xxxxxxxx.nyc.mn#SJC', 'lax.xxxxxxxx.nyc.mn#LAX','nrt.xxxxxxxx.nyc.mn#JP','fra.xxxxxxxx.nyc.mn#DE'
+    'sjc.xxxxxxxx.nyc.mn#美国 域名 圣何塞 — Cloudflare CDN 节点', 'lax.xxxxxxxx.nyc.mn#美国 域名 洛杉矶 — Cloudflare CDN 节点','nrt.xxxxxxxx.nyc.mn#日本 域名 成田市 — Cloudflare CDN 节点','fra.xxxxxxxx.nyc.mn#德国 域名 黑森州 — Cloudflare CDN 节点'
 ]; 
 
 // 修改点：改为服务端直接反代抓取内容，不再输出跳转代码
