@@ -4,7 +4,7 @@ let proxyIP = 'wok.woxxxxxx.nyc.mn';  // proxyIP
 let yourUUID = '1f9d104e-ca0e-4202-ba4b-a0afb969c748';  // UUID
 
 // 伪装页面地址
-let fakePage = 'https://cf.090227.xyz/';
+let fakePage = 'https://cf-worker-dir-bke.pages.dev/';
 
 // CDN 
 let cfip = [ 
