@@ -35,7 +35,7 @@ async function serveDisguisePage() {
 }
 // --- 结束新增 ---
 
-// [NEW] 引入 SOCKS5 工具函数
+// --- 新增：SOCKS5 连接与鉴权逻辑 ---
 function parsePryAddress(serverStr) {
     if (!serverStr) return null;
     serverStr = serverStr.trim();
@@ -82,7 +82,7 @@ async function connect2Socks5(proxyConfig, targetHost, targetPort, initialData) 
         return socket;
     } catch (e) { throw e; }
 }
-// [END] SOCKS5 函数
+// --- 结束新增 ---
 
 if (!isValidUUID(userID)) {
 	throw new Error('uuid is not valid');
@@ -200,12 +200,11 @@ async function dynamicProtocolOverWSHandler(request, fallbackProxyIP, fallbackPr
 }
 
 async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, dynamicProtocolResponseHeader, log, fallbackProxyIP, fallbackProxyPort) {
-    // [MODIFIED] 使用新增的 parsePryAddress 检测代理
+    // [MODIFIED] 这里使用了 SOCKS5 代理判断逻辑
     const proxyConfig = fallbackProxyIP ? parsePryAddress(`socks5://${fallbackProxyIP}:${fallbackProxyPort}`) : null;
     
 	async function connectAndWrite(address, port) {
         let tcpSocket;
-        // [MODIFIED] 支持 SOCKS5
         if (proxyConfig && proxyConfig.type === 'socks5') {
             log(`connecting via SOCKS5 proxy: ${proxyConfig.host}:${proxyConfig.port}`);
             tcpSocket = await connect2Socks5(proxyConfig, address, port, rawClientData);
