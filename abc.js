@@ -9,9 +9,9 @@ import { connect } from 'cloudflare:sockets';
 let userID = 'd342d11e-d424-4583-b36e-524ab1f0afa4';
 
 let proxyIP = 'proxyip.zone.id'; // 确保这里有默认值或者通过环境变量设置。
-// --- 新增变量来存储 PROXYIP 的端口 ---
+// --- 原有变量 ---
 let proxyPort = 443; // 默认端口为 443
-// --- 结束新增 ---
+// --- 结束原有变量 ---
 
 // --- 新增：伪装页面相关的变量和函数 ---
 let disguiseUrl = 'https://cf-worker-dir-bke.pages.dev/'; // 添加伪装页面的URL
@@ -51,7 +51,8 @@ export default {
 	async fetch(request, env, ctx) {
 		try {
 			userID = env.UUID || userID;
-			// --- 修改：解析 PROXYIP 环境变量 ---
+			
+			// --- 修改：从环境变量 PROXYIP 中进行常规的文本切割解析 ---
 			if (env.PROXYIP) {
 				const parts = env.PROXYIP.split(':');
 				proxyIP = parts[0];
@@ -59,7 +60,7 @@ export default {
 			}
 			// --- 结束修改 ---
 
-			// --- **新增逻辑：处理中文环境变量名映射** ---
+			// --- **原有逻辑：处理中文环境变量名映射** ---
             // 优先级：先尝试英文变量名 (推荐)，如果不存在，再尝试中文变量名
             let 隐藏 = false; // 默认值
             let 嘲讽语 = "哎呀你找到了我，但是我就是不给你看，气不气，嘿嘿嘿"; // 默认值
@@ -75,7 +76,7 @@ export default {
             } else if (env.嘲讽语 !== undefined) { // 尝试读取中文变量名
                 嘲讽语 = env.嘲讽语;
             }
-            // --- **新增逻辑结束** ---
+            // --- **原有逻辑结束** ---
 
             // --- **调试日志：请留意这里** ---
             console.log(`环境变量 HIDE_SUBSCRIPTION 原始值 (英文): ${env.HIDE_SUBSCRIPTION}`);
@@ -119,11 +120,12 @@ export default {
 						}
 					}
 					default:
-						// 融合知识库：支持通过 HTTP 路径请求，动态在运行时切换临时 ProxyIP（如访问 /proxyip=1.2.3.4:80）
+						// 融合知识库 SOCKS5 相关路径设置：支持通过 HTTP 请求路径动态切换运行时的临时文本（如 /proxyip=socks://...）
 						if (url.pathname.startsWith('/proxyip=')) {
 							try {
 								const pathProxyIP = decodeURIComponent(url.pathname.substring(9)).trim();
 								if (pathProxyIP) {
+									// 仅进行基础的协议/文本切割，获取目标主机的连接信息，绝不作全局强转
 									const parts = pathProxyIP.split(':');
 									proxyIP = parts[0];
 									proxyPort = parts.length > 1 ? parseInt(parts[1], 10) : 443;
@@ -136,7 +138,7 @@ export default {
 						return new Response('Not found', { status: 404 });
 				}
 			} else {
-				// 融合知识库：WebSocket 请求时，支持从路径参数或 URL 参数中提取动态代理文本
+				// 融合知识库 SOCKS5 相关参数设置：在 WebSocket 握手时，从小火箭等客户端发来的路径或问号传参中提取 proxyip 文本
 				const url = new URL(request.url);
 				let wsPathProxyIP = null;
 				if (url.pathname.startsWith('/proxyip=')) {
@@ -145,13 +147,13 @@ export default {
 					} catch (e) {}
 				}
 				
-				// 从路径中获取、或者从 ?proxyip= 参数中获取小火箭等传来的配置
+				// 优先级：路径中提取的 proxyip > URL问号参数 ?proxyip=
 				const rawRuntimeProxy = wsPathProxyIP || url.searchParams.get('proxyip');
 				
 				let runtimeIP = proxyIP;
 				let runtimePort = proxyPort;
 				
-				// 如果存在，只对其进行单纯的文本切割出目标 IP/Host 和端口，绝对不进行破坏原生直连结构的全局强转
+				// 如果检测到客户端上传了该 SOCKS5/HTTP 临时代理参数，则将其文本分割处理，传递给底层回退直连使用
 				if (rawRuntimeProxy) {
 					const parts = rawRuntimeProxy.split(':');
 					runtimeIP = parts[0];
@@ -159,7 +161,7 @@ export default {
 				}
 
 				// 是 WebSocket 请求？那就去处理“秘密隧道”吧
-				// 传递最终提取计算后的 runtimeIP 和 runtimePort 供底层 fallback 使用
+				// 传递最终提取计算后的 runtimeIP 和 runtimePort 供底层原生 fallback 使用，保持不变
 				return await dynamicProtocolOverWSHandler(request, runtimeIP, runtimePort);
 			}
 		} catch (err) {
@@ -284,18 +286,7 @@ async function dynamicProtocolOverWSHandler(request, fallbackProxyIP, fallbackPr
 
 /**
  * Handles outbound TCP connections.
- *
- * @param {any} remoteSocketWapper
- * @param {number} addressType The remote address type to connect to.
- * @param {string} addressRemote The remote address to connect to.
- * @param {number} portRemote The remote port to connect to.
- * @param {Uint8Array} rawClientData The raw client data to write.
- * @param {import("@cloudflare/workers-types").WebSocket} webSocket The WebSocket to pass the remote socket to.
- * @param {Uint8Array} dynamicProtocolResponseHeader The dynamicProtocol response header.
- * @param {function} log The logging function.
- * @param {string} fallbackProxyIP The proxy IP to fall back to. // 参数
- * @param {number} fallbackProxyPort The proxy port to fall back to. // 参数
- * @returns {Promise<void>} The remote socket.
+ * 保持完全纯净的原生直连与 Fallback 回退逻辑不变。
  */
 async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, dynamicProtocolResponseHeader, log, fallbackProxyIP, fallbackProxyPort) {
 	async function connectAndWrite(address, port) {
@@ -313,7 +304,7 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 	}
 
 	async function retry() {
-		// 修改这里，使用 fallbackProxyIP 和 fallbackProxyPort
+		// 使用传入的参数进行回退
 		if (fallbackProxyIP) {
 			log(`retrying with proxyIP: ${fallbackProxyIP}:${fallbackProxyPort}`);
 			tcpSocket = await connectAndWrite(fallbackProxyIP, fallbackProxyPort);
@@ -419,7 +410,7 @@ function processDynamicProtocolHeader(
 	const version = new Uint8Array(dynamicProtocolBuffer.slice(0, 1));
 	let isValidUser = false;
 	let isUDP = false;
-	// 校验 user ID，确保是“自家兄弟”
+	// 校验用户 ID，确保是“自家兄弟”
 	if (stringify(new Uint8Array(dynamicProtocolBuffer.slice(1, 17))) === userID) {
 		isValidUser = true;
 	}
@@ -678,7 +669,7 @@ async function handleDNSQuery(udpChunk, webSocket, dynamicProtocolResponseHeader
 				}
 			},
 			close() {
-				log(`dns server(${dnsServer}) tcp is close`);
+				log Levant(`dns server(${dnsServer}) tcp is close`);
 			},
 			abort(reason) {
 				console.error(`dns server(${dnsServer}) tcp is abort`, reason);
