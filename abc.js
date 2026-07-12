@@ -50,13 +50,11 @@ export default {
 		try {
 			userID = env.UUID || userID;
 			
-			// --- 修正：针对 PROXYIP 不支持全局的特性，将其恢复为纯粹的文本切割，只解析特定的 IP 和 端口 ---
+			// --- 核心修改：优先从环境变量 PROXYIP 中解析 SOCKS5 / HTTP 或常规 IP:PORT ---
 			if (env.PROXYIP) {
-				const parts = env.PROXYIP.split(':');
-				proxyIP = parts[0].trim();
-				proxyPort = parts.length > 1 ? parseInt(parts[1], 10) : 443;
+				proxyIP = env.PROXYIP.trim();
 			}
-			// --- 结束修正 ---
+			// --- 结束修改 ---
 
 			// --- **原有中文环境变量映射** ---
             let 隐藏 = false; 
@@ -97,15 +95,13 @@ export default {
 						}
 					}
 					default:
-						// 融合知识库：支持通过 HTTP 请求路径直接动态切换临时 ProxyIP（例如访问：/proxyip=12.34.56.78:80）
+						// 融合知识库：支持通过 HTTP 请求路径直接动态切换临时 ProxyIP（例如访问：/proxyip=socks://user:pass@host:port）
 						if (url.pathname.startsWith('/proxyip=')) {
 							try {
 								const pathProxyIP = decodeURIComponent(url.pathname.substring(9)).trim();
 								if (pathProxyIP) {
-									const parts = pathProxyIP.split(':');
-									proxyIP = parts[0];
-									proxyPort = parts.length > 1 ? parseInt(parts[1], 10) : 443;
-									return new Response(`临时成功切换全局出站代理为: ${proxyIP}:${proxyPort}\n`, {
+									proxyIP = pathProxyIP;
+									return new Response(`临时成功切换全局出站代理为: ${proxyIP}\n`, {
 										headers: { 'Content-Type': 'text/plain; charset=utf-8' }
 									});
 								}
