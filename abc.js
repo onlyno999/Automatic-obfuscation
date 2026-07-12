@@ -398,7 +398,7 @@ async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
 }
 
 /**
- * 核心改造：完全重构底层出站逻辑，深度整合 SOCKS5 / HTTP 全局代理链与故障转移回退
+ * 核心改造：完全重构底层出站逻辑，使其优先尝试直连。只有当直连失败或显式配置了 socks5/http 协议中转时才走代理链。
  */
 async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, dynamicProtocolResponseHeader, log, runtimeProxy) {
 	
@@ -431,19 +431,19 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 	// 解析出当前运行时应当使用的出站规则
 	const parsedProxy = parseProxyAddress(runtimeProxy);
 	
-	// 判断是否强制使用全局代理（配置为 socks5/http 协议头时）
+	// 判断是否强制使用全局中转代理（配置为 socks5:// 或 http:// 协议头时）
 	const isForceProxy = parsedProxy && (parsedProxy.type === 'socks5' || parsedProxy.type === 'http');
 
 	// 触发重试/回退的安全边界机制
 	async function retryFallback() {
 		try {
 			if (isForceProxy) {
-				// 如果强制使用代理但第一次失败了，回退到普通的直连或默认配置直连
-				log(`Proxy chain failed. Falling back to original address: ${addressRemote}:${portRemote}`);
+				// 如果强制使用代理但中转连接失败了，作为后备回退到直连真实目标地址
+				log(`Proxy chain failed. Falling back to direct connection: ${addressRemote}:${portRemote}`);
 				const fallbackSocket = await connectDirect(addressRemote, portRemote, rawClientData);
 				setupSocketLifecycle(fallbackSocket);
 			} else if (parsedProxy) {
-				// 如果原本是尝试直接连外部 ProxyIP 失败，此时通过该代理中转
+				// 【核心改动】：如果直连失败，现在在此处作为后备计划去尝试通过代理服务器中转
 				log(`Direct connection failed. Retrying through proxy chain: ${runtimeProxy}`);
 				const fallbackSocket = await connectViaProxy(parsedProxy, rawClientData);
 				setupSocketLifecycle(fallbackSocket);
@@ -466,16 +466,16 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 	// 建立首发数据流
 	try {
 		if (isForceProxy) {
-			// 如果设置了 socks5:// 或 http:// 前缀，直接走中转代理
+			// 如果显式设置了 socks5:// 或 http:// 前缀，依然直接走中转代理
 			let tcpSocket = await connectViaProxy(parsedProxy, rawClientData);
 			remoteSocketToWS(tcpSocket, webSocket, dynamicProtocolResponseHeader, retryFallback, log);
 		} else {
-			// 否则：默认尝试向目标发起直连。如果遭遇阻断失败，则自动触发 retry 尝试通过代理服务器中转
+			// 【核心修改点】：默认不再无脑走 proxyIP。直接第一优先级优先尝试去连目标的真实地址（直连）
 			let tcpSocket = await connectDirect(addressRemote, portRemote, rawClientData);
 			remoteSocketToWS(tcpSocket, webSocket, dynamicProtocolResponseHeader, retryFallback, log);
 		}
 	} catch (err) {
-		log(`Initial routing attempt error: ${err.message}. Triggering backup chain...`);
+		log(`Initial direct routing attempt error: ${err.message}. Triggering backup chain...`);
 		await retryFallback();
 	}
 }
