@@ -8,7 +8,7 @@ import { connect } from 'cloudflare:sockets';
 // [Windows] Press "Win + R", input cmd and run:  Powershell -NoExit -Command "[guid]::NewGuid()"
 let userID = 'd342d11e-d424-4583-b36e-524ab1f0afa4';
 
-let proxyIP = ' '; // 确保这里有默认值或者通过环境变量设置。
+let proxyIP = 'proxyip.zone.id'; // 确保这里有默认值或者通过环境变量设置。
 // --- 原有变量 ---
 let proxyPort = 443; // 默认端口为 443
 
