@@ -4,10 +4,10 @@ import { connect } from 'cloudflare:sockets';
 let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
 
 // 1. 内置 ProxyIP 备用代理 (直连失败后回退，格式: "ip:port")
-const PROXYIP = ""; 
+const PROXYIP = "wok.woxxxxxx.nyc.mn"; 
 
 // 2. 内置 SOCKS5 / HTTP 备用代理 (直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
-const SOCKS5 = ""; 
+const SOCKS5 = "golio:meme@pvk.xxxxxxxx.nyc.mn:25804"; 
 
 // 3. 内置强制全局代理 (若填写则跳过直连，全量走此代理，格式: "socks5://..." 或 "http://...")
 const SOCKS5_GLOBAL = ""; 
@@ -27,10 +27,33 @@ export default {
 
     const { proxyIP, socks5, enableSocks, globalProxy } = parseProxyConfig(url.pathname);
 
+    // 解析 Early Data (?ed=2560 或 Sec-WebSocket-Protocol 携带的早期数据)
+    const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
+    let earlyData = null;
+    if (earlyDataHeader) {
+      try {
+        // 解码 Base64 / Base64URL 格式的 Early Data
+        const base64Str = earlyDataHeader.replace(/-/g, '+').replace(/_/g, '/');
+        const binaryStr = atob(base64Str);
+        earlyData = Uint8Array.from(binaryStr, c => c.charCodeAt(0));
+      } catch (e) {
+        // 如果解析失败，回退为非 ed 模式
+      }
+    }
+
     const { 0: client, 1: server } = new WebSocketPair();
     server.accept();
-    handle(server, proxyIP, socks5, enableSocks, globalProxy);
-    return new Response(null, { status: 101, webSocket: client });
+    
+    // 将 earlyData 传入 handle 处理
+    handle(server, proxyIP, socks5, enableSocks, globalProxy, earlyData);
+    
+    // 如果使用了 Sec-WebSocket-Protocol 传递 ed，响应头中必须回显该 Protocol
+    const headers = new Headers();
+    if (earlyDataHeader) {
+      headers.set('Sec-WebSocket-Protocol', earlyDataHeader);
+    }
+
+    return new Response(null, { status: 101, webSocket: client, headers });
   }
 };
 
@@ -156,7 +179,6 @@ async function httpConnect(addressType, addressRemote, portRemote, cfg) {
   }
 }
 
-// 对应你的要求：针对 /SOCKS5 与 /ProxyIP= 路径格式匹配
 function parseProxyConfig(path) {
   let proxyIP = null, socks5 = null, enableSocks = null, globalProxy = null;
 
@@ -175,11 +197,10 @@ function parseProxyConfig(path) {
     }
   }
 
-  // 2. 局部反代（直连失败回退）：以 /ProxyIP= 开头（支持配置 SOCKS5 反代或 ProxyIP 地址）
+  // 2. 局部反代（直连失败回退）：以 /ProxyIP= 开头
   const proxyIpMatch = path.match(/^\/ProxyIP[=\/]([^?#]+)/i);
   if (proxyIpMatch) {
     const seg = proxyIpMatch[1];
-    // 如果带了 @ 或端口协议特征，判定为 SOCKS5 反代节点，否则解析为 ProxyIP
     if (seg.includes('@') || seg.includes('socks')) {
       socks5 = socks5AddressParser(seg);
       enableSocks = 'socks5';
@@ -188,7 +209,6 @@ function parseProxyConfig(path) {
       proxyIP = { address: addr.includes('[') ? addr.slice(1, -1) : addr, port: +port };
     }
   } else {
-    // 读取内置的备用回退代理配置
     if (SOCKS5) {
       socks5 = socks5AddressParser(SOCKS5);
       enableSocks = 'socks5';
@@ -214,7 +234,7 @@ class Pool {
   }; enableLarge = () => { this.large = true; }; reset = () => { this.ptr = 0; this.pool.length = 0; this.large = false; };
 }
 
-const handle = (ws, proxyIP, socks5, enableSocks, globalProxy) => {
+const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
   const pool = new Pool(); let sock, w, r, info, first = true, rxBytes = 0, stalls = 0, reconns = 0;
   let lastAct = Date.now(), conn = false, reading = false; const tmrs = {}, pend = [];
   let pendBytes = 0, score = 1.0, lastChk = Date.now(), lastRx = 0, succ = 0, fail = 0;
@@ -270,7 +290,6 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy) => {
   };
 
   const tryConnect = async (host, port, addressType) => {
-    // 1. 强行全局代理
     if (globalProxy) {
       if (globalProxy.type === 'socks5')
         return await socks5Connect(addressType, host, port, globalProxy.cfg);
@@ -278,13 +297,11 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy) => {
         return await httpConnect(addressType, host, port, globalProxy.cfg);
     } 
 
-    // 2. 尝试目标直连
     try {
       const socket = connect({ hostname: host, port });
       if (socket.opened) await socket.opened;
       return socket;
     } catch (err) {
-      // 3. 直连失败，进入回退代理（SOCKS5 反代 / ProxyIP）
       if (!socks5 && !proxyIP) throw err;
 
       if (socks5) {
@@ -307,6 +324,20 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy) => {
 
       throw err; 
     }
+  };
+
+  const processFirstChunk = (b) => {
+    if (buildUUID(b, 1) !== UUID) throw new Error('Auth failed');
+    const { host, port, payload, addressType } = extractAddr(b);
+    info = { host, port, addressType };
+    ws.send(new Uint8Array([b[0], 0]));
+    conn = true;
+    if (payload.length) {
+      const buf = pool.alloc(payload.length); buf.set(payload);
+      pend.push(buf); pendBytes += buf.length;
+    }
+    startTmrs();
+    establish();
   };
 
   const establish = async () => {
@@ -364,26 +395,29 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy) => {
     if (ws.readyState === 1) ws.close(code, reason);
   };
 
+  // 如果在握手 Header 中提取到了 Early Data，优先处理该首包数据
+  if (earlyData) {
+    first = false;
+    try {
+      processFirstChunk(earlyData);
+    } catch (err) {
+      cleanup();
+      ws.close(1006, 'Error.');
+      return;
+    }
+  }
+
   ws.addEventListener('message', async e => {
     try {
       if (first) {
         first = false;
-        const b = new Uint8Array(e.data);
-        if (buildUUID(b, 1) !== UUID) throw new Error('Auth failed');
-        const { host, port, payload, addressType } = extractAddr(b);
-        info = { host, port, addressType };
-        ws.send(new Uint8Array([b[0], 0]));
-        conn = true;
-        if (payload.length) {
-          const buf = pool.alloc(payload.length); buf.set(payload);
-          pend.push(buf); pendBytes += buf.length;
-        }
-        startTmrs();
-        establish();
-      } else { lastAct = Date.now();
+        processFirstChunk(new Uint8Array(e.data));
+      } else { 
+        lastAct = Date.now();
         if (conn || !w) { const buf = pool.alloc(e.data.byteLength); buf.set(new Uint8Array(e.data)); pend.push(buf); pendBytes += buf.length; }
         else { await w.write(e.data); }
-      }} catch (err) { cleanup(); ws.close(1006, 'Error.'); }
+      }
+    } catch (err) { cleanup(); ws.close(1006, 'Error.'); }
   });
   ws.addEventListener('close', cleanup);
   ws.addEventListener('error', cleanup);
