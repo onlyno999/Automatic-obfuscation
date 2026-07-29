@@ -4,7 +4,7 @@ import { connect } from 'cloudflare:sockets';
 let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
 
 // 1. 内置 ProxyIP 备用代理 (直连失败后回退，格式: "ip:port")
-const PROXYIP = "";  
+const PROXYIP = "wok.woxxxxxx.nyc.mn";  
 
 // 2. 内置 SOCKS5 / HTTP 备用代理 (直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
 const SOCKS5 = ""; 
