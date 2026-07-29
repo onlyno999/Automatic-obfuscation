@@ -3,13 +3,13 @@ import { connect } from 'cloudflare:sockets';
 // ==================== 内置默认配置区 ====================
 let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
 
-// 1. 内置 ProxyIP 备用代理 (直连失败后回退，格式: "ip:port")
+// 1. 内置 ProxyIP
 const PROXYIP = "1111111111111111";  
 
-// 2. 内置 SOCKS5 / HTTP 备用代理 (直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
+// 2. 内置 SOCKS5 
 const SOCKS5 = "2222222222222222"; 
 
-// 3. 内置强制全局代理 (若填写则跳过直连，全量走此代理，格式: "socks5://..." 或 "http://...")
+// 3. 内置全局 (socks5全局）
 const SOCKS5_GLOBAL = "333333333333333333"; 
 
 // ========================================================
@@ -27,7 +27,7 @@ export default {
 
     const { proxyIP, socks5, enableSocks, globalProxy } = parseProxyConfig(url.pathname);
 
-    // 解析 Early Data (?ed=2560 或 Sec-WebSocket-Protocol 携带的早期数据)
+    // 解析 Early Data (?ed=2560 或 Sec-WebSocket-Protocol )
     const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
     let earlyData = null;
     if (earlyDataHeader) {
