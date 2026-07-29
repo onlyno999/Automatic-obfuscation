@@ -1,19 +1,3 @@
-import { connect } from 'cloudflare:sockets';
-
-// ==================== 内置默认配置区 ====================
-let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
-
-// 1. 内置 ProxyIP
-const PROXYIP = "1111111111111111";  
-
-// 2. 内置 SOCKS5 
-const SOCKS5 = "2222222222222222"; 
-
-// 3. 内置全局 (socks5全局）
-const SOCKS5_GLOBAL = "333333333333333333"; 
-
-// ========================================================
-
 const MAX_PENDING = 2 * 1024 * 1024, KEEPALIVE = 15000, STALL_TO = 8000, MAX_STALL = 12, MAX_RECONN = 24;
 const buildUUID = (a, i) => Array.from(a.slice(i, i + 16)).map(n => n.toString(16).padStart(2, '0')).join('').replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
 
