@@ -1,35 +1,53 @@
 let currentColo = null;
-const getCurrentColo = async (baseHost) => {
+const getCurrentColo = async () => {
   if (currentColo !== null) return currentColo;
   try {
     const text = await fetch('https://cp.cloudflare.com/cdn-cgi/trace', {
       headers: { 'User-Agent': 'Mozilla/5.0' }
     }).then(r => r.text());
     const i = text.indexOf('colo=');
-    const colo = i >= 0 ? text.slice(i + 5, i + 8).toLowerCase() : '';
-    // 匹配到地区拼接 colo.域名，未匹配到直接返回 baseHost
-    currentColo = colo ? `${colo}.${baseHost}` : baseHost;
+    currentColo = i >= 0 ? text.slice(i + 5, i + 8).toLowerCase() : '';
     return currentColo;
   } catch {
-    // 请求报错/超时自动回跳至 baseHost
-    currentColo = baseHost;
-    return currentColo;
+    currentColo = '';
+    return '';
   }
 };
 
-const resolveProxyIP = async (proxyIPConfig, targetPort) => {
-  // 1. 如果 URL 中显式携带了 /ProxyIP= 参数，优先使用 URL 指定的
+const connectProxyIP = async (proxyIPConfig, targetPort) => {
+  // 1. URL 中显式携带了 /ProxyIP= 参数
   if (proxyIPConfig) {
-    return { hostname: proxyIPConfig.address, port: proxyIPConfig.port || targetPort };
+    const s = connect({ hostname: proxyIPConfig.address, port: proxyIPConfig.port || targetPort });
+    if (s.opened) await s.opened;
+    return s;
   }
-  // 2. 如果 PROXYIP 是纯 IP 地址或包含端口，直接使用
+
+  // 如果没有 URL 参数且常量 PROXYIP 也留空，直接退出
+  if (!PROXYIP) return null;
+
+  // 2. 纯 IP 地址或包含端口
   if (/^(\d{1,3}\.){3}\d{1,3}$/.test(PROXYIP) || PROXYIP.includes(':')) {
     const [h, p] = parseAddressPort(PROXYIP);
-    return { hostname: h, port: p || targetPort };
+    const s = connect({ hostname: h, port: p || targetPort });
+    if (s.opened) await s.opened;
+    return s;
   }
-  // 3. 域名模式：自动探测当前 Colo 拼接，失败回跳
-  const fallbackHost = await getCurrentColo(PROXYIP);
-  return { hostname: fallbackHost, port: targetPort };
+
+  // 3. 域名模式：先尝试 [colo].[baseHost]
+  const colo = await getCurrentColo();
+  if (colo) {
+    try {
+      const coloHost = `${colo}.${PROXYIP}`;
+      const s = connect({ hostname: coloHost, port: targetPort });
+      if (s.opened) await s.opened;
+      return s;
+    } catch {}
+  }
+
+  // 4. 回退连接基础域名
+  const fallbackSocket = connect({ hostname: PROXYIP, port: targetPort });
+  if (fallbackSocket.opened) await fallbackSocket.opened;
+  return fallbackSocket;
 };
 
 const MAX_PENDING = 2 * 1024 * 1024, KEEPALIVE = 15000, STALL_TO = 8000, MAX_STALL = 12, MAX_RECONN = 24;
@@ -40,7 +58,7 @@ export default {
     const url = new URL(request.url);
 
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
-      return new Response('OK', { status: 200 });
+      return new Response('Hello World!', { status: 200 });
     }
 
     const { proxyIP, socks5, enableSocks, globalProxy } = parseProxyConfig(url.pathname);
@@ -194,20 +212,22 @@ async function httpConnect(addressType, addressRemote, portRemote, cfg) {
 function parseProxyConfig(path) {
   let proxyIP = null, socks5 = null, enableSocks = null, globalProxy = null;
 
+  // 1. 全局代理判断 (优先 URL，其次内置)
   const globalMatch = path.match(/^\/SOCKS5(?:[:=]|\/\/)?([^/#?]+)/i);
   if (globalMatch) {
     const cfg = socks5AddressParser(globalMatch[1]);
     globalProxy = { type: 'socks5', cfg };
     return { proxyIP, socks5, enableSocks, globalProxy };
-  } else if (SOCKS5_GLOBAL) {
+  } else if (SOCKS5_GLOBAL && SOCKS5_GLOBAL.trim() !== '') {
     const builtInGlobalMatch = SOCKS5_GLOBAL.match(/(socks5?|https?):\/\/(.+)/i);
     if (builtInGlobalMatch) {
       const cfg = socks5AddressParser(builtInGlobalMatch[2]);
-      globalProxy = { type: 'socks5', cfg };
+      globalProxy = { type: builtInGlobalMatch[1].toLowerCase().startsWith('http') ? 'http' : 'socks5', cfg };
       return { proxyIP, socks5, enableSocks, globalProxy };
     }
   }
 
+  // 2. URL 携带的 ProxyIP 判定
   const proxyIpMatch = path.match(/^\/ProxyIP[=\/]([^?#]+)/i);
   if (proxyIpMatch) {
     const seg = proxyIpMatch[1];
@@ -218,11 +238,10 @@ function parseProxyConfig(path) {
       const [addr, port = 443] = parseAddressPort(seg);
       proxyIP = { address: addr.includes('[') ? addr.slice(1, -1) : addr, port: +port };
     }
-  } else {
-    if (SOCKS5) {
-      socks5 = socks5AddressParser(SOCKS5);
-      enableSocks = 'socks5';
-    }
+  } else if (SOCKS5 && SOCKS5.trim() !== '') {
+    // 3. 常量 SOCKS5 (仅在非空时解析)
+    socks5 = socks5AddressParser(SOCKS5);
+    enableSocks = 'socks5';
   }
 
   return { proxyIP, socks5, enableSocks, globalProxy };
@@ -296,6 +315,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
   };
 
   const tryConnect = async (host, port, addressType) => {
+    // 1. 全局代理生效时直接走全局
     if (globalProxy) {
       if (globalProxy.type === 'socks5')
         return await socks5Connect(addressType, host, port, globalProxy.cfg);
@@ -303,21 +323,21 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
         return await httpConnect(addressType, host, port, globalProxy.cfg);
     } 
 
-    // 1. 首选目标直连
+    // 2. 首选直连
     try {
       const socket = connect({ hostname: host, port });
       if (socket.opened) await socket.opened;
       return socket;
     } catch (err) {
-      // 2. 直连失败，走 ProxyIP (动态 Colo 探测 / 基础域名回跳)
-      try {
-        const proxyTarget = await resolveProxyIP(proxyIP, port);
-        const proxySocket = connect({ hostname: proxyTarget.hostname, port: proxyTarget.port });
-        if (proxySocket.opened) await proxySocket.opened;
-        return proxySocket;
-      } catch {}
+      // 3. 直连失败，仅在 PROXYIP 存在时尝试
+      if (proxyIP || (PROXYIP && PROXYIP.trim() !== '')) {
+        try {
+          const proxySocket = await connectProxyIP(proxyIP, port);
+          if (proxySocket) return proxySocket;
+        } catch {}
+      }
 
-      // 3. ProxyIP 失败，尝试 SOCKS5 / HTTP 备用代理
+      // 4. ProxyIP 失败后，仅在配置了 SOCKS5 时尝试
       if (socks5) {
         try {
           const localSocket = enableSocks === 'http'
