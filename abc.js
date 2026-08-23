@@ -1,121 +1,53 @@
-let verifiedProxyHost = null; // 存储已验证可用的 ProxyIP 目标域名/IP
-let warmupPromise = null;
+import { connect } from 'cloudflare:sockets';
 
-const getColoCode = async (request) => {
-  if (request?.cf?.colo) return request.cf.colo.toLowerCase();
-  try {
-    const text = await fetch('https://cp.cloudflare.com/cdn-cgi/trace', {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    }).then(r => r.text());
-    const i = text.indexOf('colo=');
-    return i >= 0 ? text.slice(i + 5, i + 8).toLowerCase() : '';
-  } catch {
-    return '';
-  }
-};
+// ==================== 内置默认配置区 ====================
+let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
 
-// WebSocket 接入瞬间触发：预检拼接域名连通性，不可用立即回退
-const warmupProxyIP = async (request) => {
-  if (verifiedProxyHost !== null) return verifiedProxyHost;
-  if (!PROXYIP) {
-    verifiedProxyHost = '';
-    return '';
-  }
+// 1. 内置 ProxyIP 备用代理 (直连失败后回退，格式: "ip:port")
+const PROXYIP = ""; 
 
-  // 纯 IP 或带端口直接使用
-  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(PROXYIP) || PROXYIP.includes(':')) {
-    verifiedProxyHost = PROXYIP;
-    return verifiedProxyHost;
-  }
+// 2. 内置 SOCKS5 / HTTP 备用代理 (直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
+const SOCKS5 = "golio:meme@pvk.xxxxxxxx.nyc.mn:25804"; 
 
-  const colo = await getColoCode(request);
-  if (!colo) {
-    verifiedProxyHost = PROXYIP;
-    return verifiedProxyHost;
-  }
+// 3. 内置强制全局代理 (若填写则跳过直连，全量走此代理，格式: "socks5://..." 或 "http://...")
+const SOCKS5_GLOBAL = ""; 
 
-  const testColoHost = `${colo}.${PROXYIP}`;
-
-  // 极速探测拼接域名 (120ms 窗口超时即视为无配置，秒级回退)
-  try {
-    const probe = connect({ hostname: testColoHost, port: 443 });
-    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 120));
-    await Promise.race([probe.opened, timeoutPromise]);
-    try { probe.close(); } catch {}
-    verifiedProxyHost = testColoHost; // 探测成功，锁定 colo 节点
-  } catch {
-    verifiedProxyHost = PROXYIP; // 探测失败/无此子域名，瞬间回退锁定基础域名
-  }
-
-  return verifiedProxyHost;
-};
-
-const connectProxyIP = async (proxyIPConfig, targetPort) => {
-  if (proxyIPConfig) {
-    const s = connect({ hostname: proxyIPConfig.address, port: proxyIPConfig.port || targetPort });
-    if (s.opened) await s.opened;
-    return s;
-  }
-
-  if (!PROXYIP) return null;
-
-  // 获取预热验证好的有效地址 (0 延迟)
-  let targetHost = verifiedProxyHost;
-  if (!targetHost && warmupPromise) {
-    targetHost = await warmupPromise;
-  }
-  if (!targetHost) targetHost = PROXYIP;
-
-  const [h, p] = parseAddressPort(targetHost);
-  
-  try {
-    const s = connect({ hostname: h, port: p || targetPort });
-    if (s.opened) await s.opened;
-    return s;
-  } catch (err) {
-    // 兜底保护：若预检判定的域名突发异常，强切基础域名
-    if (h !== PROXYIP) {
-      const fallbackSocket = connect({ hostname: PROXYIP, port: targetPort });
-      if (fallbackSocket.opened) await fallbackSocket.opened;
-      return fallbackSocket;
-    }
-    throw err;
-  }
-};
+// ========================================================
 
 const MAX_PENDING = 2 * 1024 * 1024, KEEPALIVE = 15000, STALL_TO = 8000, MAX_STALL = 12, MAX_RECONN = 24;
 const buildUUID = (a, i) => Array.from(a.slice(i, i + 16)).map(n => n.toString(16).padStart(2, '0')).join('').replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
 
 export default {
   async fetch(request, env) {
-    // 1. WS 发起瞬间：在后台即刻并行启动连通测试与自动回退判定
-    if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
-      if (!verifiedProxyHost && !warmupPromise) {
-        warmupPromise = warmupProxyIP(request);
-      }
-    } else {
+    const url = new URL(request.url);
+
+    if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
       return new Response('Hello World!', { status: 200 });
     }
 
-    const url = new URL(request.url);
     const { proxyIP, socks5, enableSocks, globalProxy } = parseProxyConfig(url.pathname);
 
-    // 解析 Early Data
+    // 解析 Early Data (?ed=2560 或 Sec-WebSocket-Protocol 携带的早期数据)
     const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
     let earlyData = null;
     if (earlyDataHeader) {
       try {
+        // 解码 Base64 / Base64URL 格式的 Early Data
         const base64Str = earlyDataHeader.replace(/-/g, '+').replace(/_/g, '/');
         const binaryStr = atob(base64Str);
         earlyData = Uint8Array.from(binaryStr, c => c.charCodeAt(0));
-      } catch (e) {}
+      } catch (e) {
+        // 如果解析失败，回退为非 ed 模式
+      }
     }
 
     const { 0: client, 1: server } = new WebSocketPair();
     server.accept();
     
+    // 将 earlyData 传入 handle 处理
     handle(server, proxyIP, socks5, enableSocks, globalProxy, earlyData);
     
+    // 如果使用了 Sec-WebSocket-Protocol 传递 ed，响应头中必须回显该 Protocol
     const headers = new Headers();
     if (earlyDataHeader) {
       headers.set('Sec-WebSocket-Protocol', earlyDataHeader);
@@ -148,6 +80,7 @@ const parseAddressPort = (seg) => {
 
 const socks5AddressParser = (raw) => {
   let username, password, hostname, port;
+
   const cleanedRaw = raw.replace(/^(socks5?|https?):\/\//i, '');
 
   if (cleanedRaw.includes('://')) {
@@ -249,20 +182,22 @@ async function httpConnect(addressType, addressRemote, portRemote, cfg) {
 function parseProxyConfig(path) {
   let proxyIP = null, socks5 = null, enableSocks = null, globalProxy = null;
 
+  // 1. 全局代理：只要以 /SOCKS5 开头（如 /SOCKS5=... 或 /SOCKS5://...）
   const globalMatch = path.match(/^\/SOCKS5(?:[:=]|\/\/)?([^/#?]+)/i);
   if (globalMatch) {
     const cfg = socks5AddressParser(globalMatch[1]);
     globalProxy = { type: 'socks5', cfg };
     return { proxyIP, socks5, enableSocks, globalProxy };
-  } else if (SOCKS5_GLOBAL && SOCKS5_GLOBAL.trim() !== '') {
+  } else if (SOCKS5_GLOBAL) {
     const builtInGlobalMatch = SOCKS5_GLOBAL.match(/(socks5?|https?):\/\/(.+)/i);
     if (builtInGlobalMatch) {
       const cfg = socks5AddressParser(builtInGlobalMatch[2]);
-      globalProxy = { type: builtInGlobalMatch[1].toLowerCase().startsWith('http') ? 'http' : 'socks5', cfg };
+      globalProxy = { type: 'socks5', cfg };
       return { proxyIP, socks5, enableSocks, globalProxy };
     }
   }
 
+  // 2. 局部反代（直连失败回退）：以 /ProxyIP= 开头
   const proxyIpMatch = path.match(/^\/ProxyIP[=\/]([^?#]+)/i);
   if (proxyIpMatch) {
     const seg = proxyIpMatch[1];
@@ -273,9 +208,15 @@ function parseProxyConfig(path) {
       const [addr, port = 443] = parseAddressPort(seg);
       proxyIP = { address: addr.includes('[') ? addr.slice(1, -1) : addr, port: +port };
     }
-  } else if (SOCKS5 && SOCKS5.trim() !== '') {
-    socks5 = socks5AddressParser(SOCKS5);
-    enableSocks = 'socks5';
+  } else {
+    if (SOCKS5) {
+      socks5 = socks5AddressParser(SOCKS5);
+      enableSocks = 'socks5';
+    }
+    if (PROXYIP) {
+      const [addr, port = 443] = parseAddressPort(PROXYIP);
+      proxyIP = { address: addr.includes('[') ? addr.slice(1, -1) : addr, port: +port };
+    }
   }
 
   return { proxyIP, socks5, enableSocks, globalProxy };
@@ -349,7 +290,6 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
   };
 
   const tryConnect = async (host, port, addressType) => {
-    // 1. 全局代理生效时直接走全局
     if (globalProxy) {
       if (globalProxy.type === 'socks5')
         return await socks5Connect(addressType, host, port, globalProxy.cfg);
@@ -357,21 +297,13 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
         return await httpConnect(addressType, host, port, globalProxy.cfg);
     } 
 
-    // 2. 首选直连
     try {
       const socket = connect({ hostname: host, port });
       if (socket.opened) await socket.opened;
       return socket;
     } catch (err) {
-      // 3. 直连失败，连接已在 WS 握手期探测锁定的有效 Proxy 目标
-      if (proxyIP || (PROXYIP && PROXYIP.trim() !== '')) {
-        try {
-          const proxySocket = await connectProxyIP(proxyIP, port);
-          if (proxySocket) return proxySocket;
-        } catch {}
-      }
+      if (!socks5 && !proxyIP) throw err;
 
-      // 4. ProxyIP 失败后，仅在配置了 SOCKS5 时尝试
       if (socks5) {
         try {
           const localSocket = enableSocks === 'http'
@@ -379,6 +311,14 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
             : await socks5Connect(addressType, host, port, socks5);
           if (localSocket.opened) await localSocket.opened;
           return localSocket;
+        } catch {}
+      }
+
+      if (proxyIP) {
+        try {
+          const proxySocket = connect({ hostname: proxyIP.address, port: proxyIP.port });
+          if (proxySocket.opened) await proxySocket.opened;
+          return proxySocket;
         } catch {}
       }
 
@@ -455,6 +395,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
     if (ws.readyState === 1) ws.close(code, reason);
   };
 
+  // 如果在握手 Header 中提取到了 Early Data，优先处理该首包数据
   if (earlyData) {
     first = false;
     try {
