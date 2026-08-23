@@ -1,5 +1,8 @@
 let currentColo = null;
-const getCurrentColo = async () => {
+let coloPromise = null; // 存储后台预热 Promise
+
+// 探测/获取 Colo：优先原生 cf.colo，其次通过后台请求
+const fetchColo = async () => {
   if (currentColo !== null) return currentColo;
   try {
     const text = await fetch('https://cp.cloudflare.com/cdn-cgi/trace', {
@@ -14,6 +17,24 @@ const getCurrentColo = async () => {
   }
 };
 
+const prefetchColo = (request) => {
+  // 1. 极速方案：直接从 Cloudflare 运行时注入的 Request 获取 (0ms 延迟)
+  if (request?.cf?.colo) {
+    currentColo = request.cf.colo.toLowerCase();
+    return;
+  }
+  // 2. 如果不存在，立即在后台发起静默异步请求，提前打热
+  if (currentColo === null && !coloPromise) {
+    coloPromise = fetchColo();
+  }
+};
+
+const getCurrentColo = async () => {
+  if (currentColo !== null) return currentColo;
+  if (coloPromise) return await coloPromise;
+  return await fetchColo();
+};
+
 const connectProxyIP = async (proxyIPConfig, targetPort) => {
   // 1. URL 中显式携带了 /ProxyIP= 参数
   if (proxyIPConfig) {
@@ -22,7 +43,6 @@ const connectProxyIP = async (proxyIPConfig, targetPort) => {
     return s;
   }
 
-  // 如果没有 URL 参数且常量 PROXYIP 也留空，直接退出
   if (!PROXYIP) return null;
 
   // 2. 纯 IP 地址或包含端口
@@ -33,7 +53,7 @@ const connectProxyIP = async (proxyIPConfig, targetPort) => {
     return s;
   }
 
-  // 3. 域名模式：先尝试 [colo].[baseHost]
+  // 3. 域名模式：利用已预热好的 Colo 拼接
   const colo = await getCurrentColo();
   if (colo) {
     try {
@@ -55,6 +75,9 @@ const buildUUID = (a, i) => Array.from(a.slice(i, i + 16)).map(n => n.toString(1
 
 export default {
   async fetch(request, env) {
+    // 提前并行预热 Colo (利用 request.cf 极速提取或在握手同时发起 trace)
+    prefetchColo(request);
+
     const url = new URL(request.url);
 
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
@@ -212,7 +235,7 @@ async function httpConnect(addressType, addressRemote, portRemote, cfg) {
 function parseProxyConfig(path) {
   let proxyIP = null, socks5 = null, enableSocks = null, globalProxy = null;
 
-  // 1. 全局代理判断 (优先 URL，其次内置)
+  // 1. 全局代理判断
   const globalMatch = path.match(/^\/SOCKS5(?:[:=]|\/\/)?([^/#?]+)/i);
   if (globalMatch) {
     const cfg = socks5AddressParser(globalMatch[1]);
@@ -329,7 +352,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
       if (socket.opened) await socket.opened;
       return socket;
     } catch (err) {
-      // 3. 直连失败，仅在 PROXYIP 存在时尝试
+      // 3. 直连失败，走 ProxyIP (由于已预热，0ms 准备时间)
       if (proxyIP || (PROXYIP && PROXYIP.trim() !== '')) {
         try {
           const proxySocket = await connectProxyIP(proxyIP, port);
