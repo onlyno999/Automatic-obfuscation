@@ -1,19 +1,3 @@
-import { connect } from 'cloudflare:sockets';
-
-// ==================== 内置默认配置区 ====================
-let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
-
-// 1. 内置 ProxyIP 备用代理 (直连失败后回退，格式: "ip:port")
-const PROXYIP = ""; 
-
-// 2. 内置 SOCKS5 / HTTP 备用代理 (直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
-const SOCKS5 = "golio:meme@pvk.xxxxxxxx.nyc.mn:25804"; 
-
-// 3. 内置强制全局代理 (若填写则跳过直连，全量走此代理，格式: "socks5://..." 或 "http://...")
-const SOCKS5_GLOBAL = ""; 
-
-// ========================================================
-
 const MAX_PENDING = 2 * 1024 * 1024, KEEPALIVE = 15000, STALL_TO = 8000, MAX_STALL = 12, MAX_RECONN = 24;
 const buildUUID = (a, i) => Array.from(a.slice(i, i + 16)).map(n => n.toString(16).padStart(2, '0')).join('').replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
 
