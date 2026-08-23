@@ -1,42 +1,56 @@
-let currentColo = null;
-let coloPromise = null; // 存储后台预热 Promise
+let verifiedProxyHost = null; // 存储已验证可用的 ProxyIP 目标域名/IP
+let warmupPromise = null;
 
-// 探测/获取 Colo：优先原生 cf.colo，其次通过后台请求
-const fetchColo = async () => {
-  if (currentColo !== null) return currentColo;
+const getColoCode = async (request) => {
+  if (request?.cf?.colo) return request.cf.colo.toLowerCase();
   try {
     const text = await fetch('https://cp.cloudflare.com/cdn-cgi/trace', {
       headers: { 'User-Agent': 'Mozilla/5.0' }
     }).then(r => r.text());
     const i = text.indexOf('colo=');
-    currentColo = i >= 0 ? text.slice(i + 5, i + 8).toLowerCase() : '';
-    return currentColo;
+    return i >= 0 ? text.slice(i + 5, i + 8).toLowerCase() : '';
   } catch {
-    currentColo = '';
     return '';
   }
 };
 
-const prefetchColo = (request) => {
-  // 1. 极速方案：直接从 Cloudflare 运行时注入的 Request 获取 (0ms 延迟)
-  if (request?.cf?.colo) {
-    currentColo = request.cf.colo.toLowerCase();
-    return;
+// WebSocket 接入瞬间触发：预检拼接域名连通性，不可用立即回退
+const warmupProxyIP = async (request) => {
+  if (verifiedProxyHost !== null) return verifiedProxyHost;
+  if (!PROXYIP) {
+    verifiedProxyHost = '';
+    return '';
   }
-  // 2. 如果不存在，立即在后台发起静默异步请求，提前打热
-  if (currentColo === null && !coloPromise) {
-    coloPromise = fetchColo();
-  }
-};
 
-const getCurrentColo = async () => {
-  if (currentColo !== null) return currentColo;
-  if (coloPromise) return await coloPromise;
-  return await fetchColo();
+  // 纯 IP 或带端口直接使用
+  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(PROXYIP) || PROXYIP.includes(':')) {
+    verifiedProxyHost = PROXYIP;
+    return verifiedProxyHost;
+  }
+
+  const colo = await getColoCode(request);
+  if (!colo) {
+    verifiedProxyHost = PROXYIP;
+    return verifiedProxyHost;
+  }
+
+  const testColoHost = `${colo}.${PROXYIP}`;
+
+  // 极速探测拼接域名 (120ms 窗口超时即视为无配置，秒级回退)
+  try {
+    const probe = connect({ hostname: testColoHost, port: 443 });
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 120));
+    await Promise.race([probe.opened, timeoutPromise]);
+    try { probe.close(); } catch {}
+    verifiedProxyHost = testColoHost; // 探测成功，锁定 colo 节点
+  } catch {
+    verifiedProxyHost = PROXYIP; // 探测失败/无此子域名，瞬间回退锁定基础域名
+  }
+
+  return verifiedProxyHost;
 };
 
 const connectProxyIP = async (proxyIPConfig, targetPort) => {
-  // 1. URL 中显式携带了 /ProxyIP= 参数
   if (proxyIPConfig) {
     const s = connect({ hostname: proxyIPConfig.address, port: proxyIPConfig.port || targetPort });
     if (s.opened) await s.opened;
@@ -45,29 +59,28 @@ const connectProxyIP = async (proxyIPConfig, targetPort) => {
 
   if (!PROXYIP) return null;
 
-  // 2. 纯 IP 地址或包含端口
-  if (/^(\d{1,3}\.){3}\d{1,3}$/.test(PROXYIP) || PROXYIP.includes(':')) {
-    const [h, p] = parseAddressPort(PROXYIP);
+  // 获取预热验证好的有效地址 (0 延迟)
+  let targetHost = verifiedProxyHost;
+  if (!targetHost && warmupPromise) {
+    targetHost = await warmupPromise;
+  }
+  if (!targetHost) targetHost = PROXYIP;
+
+  const [h, p] = parseAddressPort(targetHost);
+  
+  try {
     const s = connect({ hostname: h, port: p || targetPort });
     if (s.opened) await s.opened;
     return s;
+  } catch (err) {
+    // 兜底保护：若预检判定的域名突发异常，强切基础域名
+    if (h !== PROXYIP) {
+      const fallbackSocket = connect({ hostname: PROXYIP, port: targetPort });
+      if (fallbackSocket.opened) await fallbackSocket.opened;
+      return fallbackSocket;
+    }
+    throw err;
   }
-
-  // 3. 域名模式：利用已预热好的 Colo 拼接
-  const colo = await getCurrentColo();
-  if (colo) {
-    try {
-      const coloHost = `${colo}.${PROXYIP}`;
-      const s = connect({ hostname: coloHost, port: targetPort });
-      if (s.opened) await s.opened;
-      return s;
-    } catch {}
-  }
-
-  // 4. 回退连接基础域名
-  const fallbackSocket = connect({ hostname: PROXYIP, port: targetPort });
-  if (fallbackSocket.opened) await fallbackSocket.opened;
-  return fallbackSocket;
 };
 
 const MAX_PENDING = 2 * 1024 * 1024, KEEPALIVE = 15000, STALL_TO = 8000, MAX_STALL = 12, MAX_RECONN = 24;
@@ -75,15 +88,16 @@ const buildUUID = (a, i) => Array.from(a.slice(i, i + 16)).map(n => n.toString(1
 
 export default {
   async fetch(request, env) {
-    // 提前并行预热 Colo (利用 request.cf 极速提取或在握手同时发起 trace)
-    prefetchColo(request);
-
-    const url = new URL(request.url);
-
-    if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
+    // 1. WS 发起瞬间：在后台即刻并行启动连通测试与自动回退判定
+    if (request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
+      if (!verifiedProxyHost && !warmupPromise) {
+        warmupPromise = warmupProxyIP(request);
+      }
+    } else {
       return new Response('Hello World!', { status: 200 });
     }
 
+    const url = new URL(request.url);
     const { proxyIP, socks5, enableSocks, globalProxy } = parseProxyConfig(url.pathname);
 
     // 解析 Early Data
@@ -235,7 +249,6 @@ async function httpConnect(addressType, addressRemote, portRemote, cfg) {
 function parseProxyConfig(path) {
   let proxyIP = null, socks5 = null, enableSocks = null, globalProxy = null;
 
-  // 1. 全局代理判断
   const globalMatch = path.match(/^\/SOCKS5(?:[:=]|\/\/)?([^/#?]+)/i);
   if (globalMatch) {
     const cfg = socks5AddressParser(globalMatch[1]);
@@ -250,7 +263,6 @@ function parseProxyConfig(path) {
     }
   }
 
-  // 2. URL 携带的 ProxyIP 判定
   const proxyIpMatch = path.match(/^\/ProxyIP[=\/]([^?#]+)/i);
   if (proxyIpMatch) {
     const seg = proxyIpMatch[1];
@@ -262,7 +274,6 @@ function parseProxyConfig(path) {
       proxyIP = { address: addr.includes('[') ? addr.slice(1, -1) : addr, port: +port };
     }
   } else if (SOCKS5 && SOCKS5.trim() !== '') {
-    // 3. 常量 SOCKS5 (仅在非空时解析)
     socks5 = socks5AddressParser(SOCKS5);
     enableSocks = 'socks5';
   }
@@ -352,7 +363,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
       if (socket.opened) await socket.opened;
       return socket;
     } catch (err) {
-      // 3. 直连失败，走 ProxyIP (由于已预热，0ms 准备时间)
+      // 3. 直连失败，连接已在 WS 握手期探测锁定的有效 Proxy 目标
       if (proxyIP || (PROXYIP && PROXYIP.trim() !== '')) {
         try {
           const proxySocket = await connectProxyIP(proxyIP, port);
