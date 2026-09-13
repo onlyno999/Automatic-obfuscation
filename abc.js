@@ -8,7 +8,7 @@ import { connect } from 'cloudflare:sockets';
 // [Windows] Press "Win + R", input cmd and run:  Powershell -NoExit -Command "[guid]::NewGuid()"
 let userID = 'd342d11e-d424-4583-b36e-524ab1f0afa4';
 
-let proxyIP = 'xxxxx.nyc.mn'; // 确保这里有默认值或者通过环境变量设置。
+let proxyIP = 'proxyip.zone.id'; // 确保这里有默认值或者通过环境变量设置。
 // --- 原有变量 ---
 let proxyPort = 443; // 默认端口为 443
 
@@ -27,7 +27,7 @@ if (!isValidUUID(userID)) {
 export default {
 	/**
 	 * @param {import("@cloudflare/workers-types").Request} request
-	 * @param {{UUID: string, PROXYIP: string, HIDE_SUBSCRIPTION?: string, SARCASM_MESSAGE?: string, 隐藏?: string, 嘲讽语?: string}} env // 增加了中文环境变量的类型提示
+	 * @param {{UUID: string, PROXYIP: string, HIDE?: string, HIDE_SUBSCRIPTION?: string, SARCASM_MESSAGE?: string, 隐藏?: string, 嘲讽语?: string}} env
 	 * @param {import("@cloudflare/workers-types").ExecutionContext} ctx
 	 * @returns {Promise<Response>}
 	 */
@@ -41,23 +41,25 @@ export default {
 			}
 			// --- 结束修改 ---
 
-			// --- **原有中文环境变量映射** ---
-            let 隐藏 = false; 
-            let 嘲讽语 = "哎呀你找到了我，但是我就是不给你看，气不气，嘿嘿嘿"; 
+			// --- 环境变量映射（支持英文字段 HIDE 与 SARCASM_MESSAGE，兼容向下回退） ---
+			let isHidden = false; 
+			let sarcasmMessage = "哎呀你找到了我，但是我就是不给你看，气不气，嘿嘿嘿"; 
 
-            if (env.HIDE_SUBSCRIPTION !== undefined) {
-                隐藏 = env.HIDE_SUBSCRIPTION === 'true';
-            } else if (env.隐藏 !== undefined) { 
-                隐藏 = env.隐藏 === 'true';
-            }
+			if (env.HIDE !== undefined) {
+				isHidden = env.HIDE === 'true';
+			} else if (env.HIDE_SUBSCRIPTION !== undefined) {
+				isHidden = env.HIDE_SUBSCRIPTION === 'true';
+			} else if (env.隐藏 !== undefined) { 
+				isHidden = env.隐藏 === 'true';
+			}
 
-            if (env.SARCASM_MESSAGE !== undefined) {
-                嘲讽语 = env.SARCASM_MESSAGE;
-            } else if (env.嘲讽语 !== undefined) { 
-                嘲讽语 = env.嘲讽语;
-            }
+			if (env.SARCASM_MESSAGE !== undefined) {
+				sarcasmMessage = env.SARCASM_MESSAGE;
+			} else if (env.嘲讽语 !== undefined) { 
+				sarcasmMessage = env.嘲讽语;
+			}
 
-            console.log(`最终解析的布尔值 隐藏: ${隐藏}, 最终代理出站配置: ${proxyIP}`);
+			console.log(`最终解析的布尔值 隐藏: ${isHidden}, 最终代理出站配置: ${proxyIP}`);
 
 			const upgradeHeader = request.headers.get('Upgrade');
 			if (!upgradeHeader || upgradeHeader !== 'websocket') {
@@ -66,8 +68,8 @@ export default {
 					case '/': 
 						return serveDisguisePage(); 
 					case `/${userID}`: {
-						if (隐藏) {
-							return new Response(嘲讽语, {
+						if (isHidden) {
+							return new Response(sarcasmMessage, {
 								status: 200,
 								headers: { "Content-Type": "text/plain;charset=utf-8" }
 							});
@@ -285,7 +287,7 @@ async function connectToHttp(proxyConfig, targetHost, targetPort, initialData) {
 }
 
 /**
- * 修改：接收经过高级解析整合后的 runtimeProxy 配置字符串
+ * 接收经过高级解析整合后的 runtimeProxy 配置字符串
  */
 async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
 
@@ -383,7 +385,7 @@ async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
 }
 
 /**
- * 核心改造：完全重构底层出站逻辑，使其优先尝试直连。只有当直连失败或显式配置了 socks5/http 协议中转时才走代理链。
+ * 底层出站逻辑：优先尝试直连，直连失败或显式配置协议时走代理链
  */
 async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, dynamicProtocolResponseHeader, log, runtimeProxy) {
 	
@@ -423,12 +425,10 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 	async function retryFallback() {
 		try {
 			if (isForceProxy) {
-				// 如果强制使用代理但中转连接失败了，作为后备回退到直连真实目标地址
 				log(`Proxy chain failed. Falling back to direct connection: ${addressRemote}:${portRemote}`);
 				const fallbackSocket = await connectDirect(addressRemote, portRemote, rawClientData);
 				setupSocketLifecycle(fallbackSocket);
 			} else if (parsedProxy) {
-				// 【核心改动】：如果直连失败，现在在此处作为后备计划去尝试通过代理服务器中转
 				log(`Direct connection failed. Retrying through proxy chain: ${runtimeProxy}`);
 				const fallbackSocket = await connectViaProxy(parsedProxy, rawClientData);
 				setupSocketLifecycle(fallbackSocket);
@@ -451,11 +451,9 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 	// 建立首发数据流
 	try {
 		if (isForceProxy) {
-			// 如果显式设置了 socks5:// 或 http:// 前缀，依然直接走中转代理
 			let tcpSocket = await connectViaProxy(parsedProxy, rawClientData);
 			remoteSocketToWS(tcpSocket, webSocket, dynamicProtocolResponseHeader, retryFallback, log);
 		} else {
-			// 【核心修改点】：默认不再无脑走 proxyIP。直接第一优先级优先尝试去连目标的真实地址（直连）
 			let tcpSocket = await connectDirect(addressRemote, portRemote, rawClientData);
 			remoteSocketToWS(tcpSocket, webSocket, dynamicProtocolResponseHeader, retryFallback, log);
 		}
