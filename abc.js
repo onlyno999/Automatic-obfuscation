@@ -26,7 +26,7 @@ const IPV4_DOMAINS = [
   'claude.ai',
   'ipinfo.io',
   'ip.sb',
-  'api.ipify.org'
+  'api.ipify.org',
   'dola.com'
 ];
 
