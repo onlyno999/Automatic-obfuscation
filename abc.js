@@ -1,3 +1,18 @@
+import { connect } from 'cloudflare:sockets';
+
+// ==================== 内置默认配置区 ====================
+let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
+
+// 1. 内置 ProxyIP 备用代理 (直连失败后回退，格式: "ip:port")
+const PROXYIP = ""; 
+
+// 2. 内置 SOCKS5 / HTTP 备用代理 (直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
+const SOCKS5 = "golio:meme@pvk.xxxxxxxx.nyc.mn:25804"; 
+
+// 3. 内置强制全局代理 (若填写则跳过直连，全量走此代理，格式: "socks5://..." 或 "http://...")
+const SOCKS5_GLOBAL = ""; 
+
+// ==================== 智能分流名单规则配置 ====================
 // 1. 强制走 IPv4 优先的域名关键字（AI 与高风控平台）
 const IPV4_DOMAINS = [
   'openai.com',
