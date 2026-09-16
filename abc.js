@@ -4,10 +4,10 @@ import { connect } from 'cloudflare:sockets';
 let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
 
 // 1. 内置 ProxyIP 备用代理 (直连失败后回退，格式: "ip:port")
-const PROXYIP = ""; 
+const PROXYIP = "wok.woxxxxxx.nyc.mn"; 
 
 // 2. 内置 SOCKS5 / HTTP 备用代理 (直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
-const SOCKS5 = "golio:meme@pvk.xxxxxxxx.nyc.mn:25804"; 
+const SOCKS5 = ""; 
 
 // 3. 内置强制全局代理 (若填写则跳过直连，全量走此代理，格式: "socks5://..." 或 "http://...")
 const SOCKS5_GLOBAL = ""; 
@@ -29,15 +29,38 @@ const IPV4_DOMAINS = [
   'api.ipify.org'
 ];
 
-// 2. 强制/保持走 IPv6 的域名关键字（流媒体高吞吐平台，跳过 IPv4 转换）
+// 2. 强制/保持走 IPv6 的域名关键字（流媒体、短视频、高吞吐平台，跳过 DoH 解析）
 const IPV6_DOMAINS = [
+  // YouTube 矩阵
   'youtube.com',
   'googlevideo.com',
   'ytimg.com',
   'youtu.be',
+
+  // Twitch (老鼠台)
+  'twitch.tv',
+  'ttvnw.net',
+  'jtvnw.net',
+
+  // TikTok (TK)
+  'tiktok.com',
+  'tiktokv.com',
+  'tiktokcdn.com',
+  'byteoversea.com',
+  'ibytedtos.com',
+
+  // Netflix / Disney+ 等大厂流媒体
   'netflix.com',
   'nflxvideo.net',
-  'dola.com'
+  'disneyplus.com',
+  'dssott.com',
+  'bamgrid.com',
+
+  // 音频与常用社媒流媒体
+  'spotify.com',
+  'scdn.co',
+  'instagram.com',
+  'cdninstagram.com'
 ];
 
 // 分流判定辅助函数
@@ -344,7 +367,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
         return await httpConnect(addressType, host, port, globalProxy.cfg);
     } 
 
-    // 分流判断：仅当地址为域名 (addressType === 2) 且命中 AI / 高风控名单时，通过 DoH 转为 IPv4 直连
+    // 分流判断：仅当地址为域名 (addressType === 2) 且命中 AI 名单时走 DoH 转 IPv4，流媒体直接放行原生走 IPv6
     let targetHost = host;
     if (addressType === 2 && shouldPreferIPv4(host)) {
       targetHost = await resolveIPv4(host);
