@@ -12,6 +12,7 @@ const IPV4_DOMAINS = [
   'ipinfo.io',
   'ip.sb',
   'api.ipify.org'
+  'www.dola.com'
 ];
 
 // 2. 强制/保持走 IPv6 的域名关键字（流媒体高吞吐平台，跳过 IPv4 转换）
