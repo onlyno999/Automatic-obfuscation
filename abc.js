@@ -115,13 +115,15 @@ export default {
 				proxyIP = env.PROXYIP.trim();
 			}
 
-            let 隐藏 = false; 
+            let HIDE = false; 
             let 嘲讽语 = "哎呀你找到了我，但是我就是不给你看，气不气，嘿嘿嘿"; 
 
-            if (env.HIDE_SUBSCRIPTION !== undefined) {
-                隐藏 = env.HIDE_SUBSCRIPTION === 'true';
+            if (env.HIDE !== undefined) {
+                HIDE = env.HIDE === 'true';
+            } else if (env.HIDE_SUBSCRIPTION !== undefined) {
+                HIDE = env.HIDE_SUBSCRIPTION === 'true';
             } else if (env.隐藏 !== undefined) { 
-                隐藏 = env.隐藏 === 'true';
+                HIDE = env.隐藏 === 'true';
             }
 
             if (env.SARCASM_MESSAGE !== undefined) {
@@ -137,7 +139,7 @@ export default {
 					case '/': 
 						return serveDisguisePage(); 
 					case `/${userID}`: {
-						if (隐藏) {
+						if (HIDE) {
 							return new Response(嘲讽语, {
 								status: 200,
 								headers: { "Content-Type": "text/plain;charset=utf-8" }
