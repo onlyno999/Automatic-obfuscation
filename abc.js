@@ -1,4 +1,23 @@
-// 国外热门 AI 平台名单（通过 DoH 强制查询 AAAA 记录走 IPv6）
+import { connect } from 'cloudflare:sockets';
+
+// ==================== 内置默认配置区 ====================
+let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
+
+// 1. AI 流量专属 SOCKS5 中转代理
+const AI_SOCKS5 = "socks5://golio:meme@pvk.xxxxxxxx.nyc.mn:25804";
+
+// 2. 内置 ProxyIP 备用代理 (普通直连失败后回退，格式: "ip:port")
+const PROXYIP = "wok.woxxxxxx.nyc.mn"; 
+
+// 3. 内置 SOCKS5 / HTTP 备用代理 (普通直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
+const SOCKS5 = ""; 
+
+// 4. 内置强制全局代理 (若填写则全量走此代理，格式: "socks5://..." 或 "http://...")
+const SOCKS5_GLOBAL = ""; 
+
+// ==================== 智能分流名单规则配置 ====================
+
+// 国外热门 AI 平台名单（强制分流走 AI_SOCKS5 中转）
 const AI_DOMAINS = [
   'openai.com',
   'chatgpt.com',
@@ -21,27 +40,6 @@ function isAiDomain(domain) {
   if (!domain || typeof domain !== 'string') return false;
   const lower = domain.toLowerCase();
   return AI_DOMAINS.some(k => lower.includes(k));
-}
-
-// DoH 查询 IPv6 (AAAA 记录，type=28)
-async function resolveIPv6(domain) {
-  if (!domain || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(domain) || domain.includes(':')) {
-    return domain;
-  }
-  try {
-    const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=AAAA`, {
-      headers: { 'accept': 'application/dns-json' },
-      cf: { cacheTtl: 300 }
-    });
-    if (!res.ok) return domain;
-    const data = await res.json();
-    const records = data.Answer?.filter(a => a.type === 28);
-    if (records && records.length > 0) {
-      const ipv6Addr = records[Math.floor(Math.random() * records.length)].data;
-      return ipv6Addr.startsWith('[') ? ipv6Addr : `[${ipv6Addr}]`;
-    }
-  } catch (e) {}
-  return domain;
 }
 // ========================================================
 
@@ -133,6 +131,9 @@ const socks5AddressParser = (raw) => {
   if (!hostname || isNaN(port)) throw new Error("Invalid proxy config");
   return { username, password, hostname, port };
 };
+
+// 解析 AI 中转节点配置
+const parsedAiSocks5 = AI_SOCKS5 ? socks5AddressParser(AI_SOCKS5) : null;
 
 async function socks5Connect(addressType, addressRemote, portRemote, cfg) {
   const { username, password, hostname, port } = cfg;
@@ -312,6 +313,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
   };
 
   const tryConnect = async (host, port, addressType) => {
+    // 1. 优先全局代理配置
     if (globalProxy) {
       if (globalProxy.type === 'socks5')
         return await socks5Connect(addressType, host, port, globalProxy.cfg);
@@ -319,17 +321,20 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
         return await httpConnect(addressType, host, port, globalProxy.cfg);
     } 
 
-    // 如果命中 AI 域名，主动发起 DoH 查询 AAAA 记录，强制解析并走 IPv6
-    let targetHost = host;
-    if (addressType === 2 && isAiDomain(host)) {
-      targetHost = await resolveIPv6(host);
+    // 2. 智能分流：若匹配国外 AI 域名，强制走 SOCKS5 中转代理
+    if (parsedAiSocks5 && isAiDomain(host)) {
+      const aiSocket = await socks5Connect(addressType, host, port, parsedAiSocks5);
+      if (aiSocket.opened) await aiSocket.opened;
+      return aiSocket;
     }
 
+    // 3. 其它常规流量直连（Cloudflare 默认双栈，支持 IPv6）
     try {
-      const socket = connect({ hostname: targetHost, port });
+      const socket = connect({ hostname: host, port });
       if (socket.opened) await socket.opened;
       return socket;
     } catch (err) {
+      // 直连失败后的回退备用机制
       if (!socks5 && !proxyIP) throw err;
 
       if (socks5) {
