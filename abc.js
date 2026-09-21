@@ -1,830 +1,451 @@
-const 文本解码器 = new TextDecoder();
-// 运行时把 base64 文本还原成字符串，避免源码里出现可被检索的明文关键词
-function 解码64(文本) {
-	const 二进制 = atob(文本);
-	const 字节 = new Uint8Array(二进制.length);
-	for (let 索引 = 0; 索引 < 二进制.length; 索引++) 字节[索引] = 二进制.charCodeAt(索引);
-	return 文本解码器.decode(字节);
+// 国外热门 AI 平台名单（强制走 DoH IPv4 出站防拦截）
+const AI_DOMAINS = [
+  'openai.com',
+  'chatgpt.com',
+  'oaistatic.com',
+  'oaiusercontent.com',
+  'anthropic.com',
+  'claude.ai',
+  'gemini.google.com',
+  'generativelanguage.googleapis.com',
+  'ai.google.dev',
+  'x.ai',
+  'grok.com',
+  'copilot.microsoft.com',
+  'sydney.bing.com',
+  'perplexity.ai',
+  'poe.com'
+];
+
+function isAiDomain(domain) {
+  if (!domain || typeof domain !== 'string') return false;
+  const lower = domain.toLowerCase();
+  return AI_DOMAINS.some(k => lower.includes(k));
 }
 
-if (!校验令牌格式(认证令牌)) {
-	throw new Error('令牌格式不合法');
+// DoH 查询 IPv4 (A 记录)
+async function resolveIPv4(domain) {
+  if (!domain || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(domain) || domain.includes(':')) {
+    return domain;
+  }
+  try {
+    const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=A`, {
+      headers: { 'accept': 'application/dns-json' },
+      cf: { cacheTtl: 300 }
+    });
+    if (!res.ok) return domain;
+    const data = await res.json();
+    const records = data.Answer?.filter(a => a.type === 1);
+    if (records && records.length > 0) {
+      return records[Math.floor(Math.random() * records.length)].data;
+    }
+  } catch (e) {}
+  return domain;
 }
+// ========================================================
 
-// 中转地址在编译期固定，这里直接解析一次（解析中转地址 靠函数提升可用）
-let 中转配置 = {};
-let 启用中转 = false;
-if (中转地址) {
-	try {
-		中转配置 = 解析中转地址(中转地址);
-		启用中转 = true;
-	} catch (err) {
-		/** @type {Error} */ let e = err;
-		console.log(e.toString());
-		启用中转 = false;
-	}
-}
+const MAX_PENDING = 2 * 1024 * 1024, KEEPALIVE = 15000, STALL_TO = 8000, MAX_STALL = 12, MAX_RECONN = 24;
+const buildUUID = (a, i) => Array.from(a.slice(i, i + 16)).map(n => n.toString(16).padStart(2, '0')).join('').replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
 
 export default {
-	/**
-	 * @param {import("@cloudflare/workers-types").Request} request
-	 * @returns {Promise<Response>}
-	 */
-	async fetch(request) {
-		try {
-			const 升级头 = request.headers.get('Upgrade');
-			if (!升级头 || 升级头 !== 'websocket') {
-				const 网址 = new URL(request.url);
-				switch (网址.pathname) {
-					case '/':
-						return new Response('hello', { status: 200 });
-					case `/${认证令牌}`: {
-						const 订阅内容 = await 生成订阅配置(认证令牌, request.headers.get('Host'));
-						return new Response(`${订阅内容}`, {
-							status: 200,
-							headers: {
-								"Content-Type": "text/plain;charset=utf-8",
-							}
-						});
-					}
-					default:
-						return new Response('Not found', { status: 404 });
-				}
-			} else {
-				return await 处理套接字升级(request);
-			}
-		} catch (err) {
-			/** @type {Error} */ let e = err;
-			return new Response(e.toString());
-		}
-	},
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
+      return new Response('Hello World!', { status: 200 });
+    }
+
+    const { proxyIP, socks5, enableSocks, globalProxy } = parseProxyConfig(url.pathname);
+
+    const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
+    let earlyData = null;
+    if (earlyDataHeader) {
+      try {
+        const base64Str = earlyDataHeader.replace(/-/g, '+').replace(/_/g, '/');
+        const binaryStr = atob(base64Str);
+        earlyData = Uint8Array.from(binaryStr, c => c.charCodeAt(0));
+      } catch (e) {}
+    }
+
+    const { 0: client, 1: server } = new WebSocketPair();
+    server.accept();
+    
+    handle(server, proxyIP, socks5, enableSocks, globalProxy, earlyData);
+    
+    const headers = new Headers();
+    if (earlyDataHeader) {
+      headers.set('Sec-WebSocket-Protocol', earlyDataHeader);
+    }
+
+    return new Response(null, { status: 101, webSocket: client, headers });
+  }
 };
 
+const extractAddr = b => {
+  const o1 = 18 + b[17] + 1, p = (b[o1] << 8) | b[o1 + 1], t = b[o1 + 2]; let o2 = o1 + 3, h, l;
+  switch (t) {
+    case 1: l = 4; h = b.slice(o2, o2 + l).join('.'); break;
+    case 2: l = b[o2++]; h = new TextDecoder().decode(b.slice(o2, o2 + l)); break;
+    case 3: l = 16; h = `[${Array.from({ length: 8 }, (_, i) => ((b[o2 + i * 2] << 8) | b[o2 + i * 2 + 1]).toString(16)).join(':')}]`; break;
+    default: throw new Error('Invalid address type.');
+  } return { host: h, port: p, payload: b.slice(o2 + l), addressType: t };
+};
 
+const parseAddressPort = (seg) => {
+  if (seg.startsWith("[")) {
+    const m = seg.match(/^\[(.+?)\]:(\d+)$/);
+    if (m) return [m[1], Number(m[2])];
+    return [seg.slice(1, -1), 443];
+  }
+  const [addr, port = 443] = seg.split(":");
+  return [addr, Number(port)];
+};
 
+const socks5AddressParser = (raw) => {
+  let username, password, hostname, port;
 
-/**
- *
- * @param {import("@cloudflare/workers-types").Request} request
- */
-async function 处理套接字升级(request) {
+  const cleanedRaw = raw.replace(/^(socks5?|https?):\/\//i, '');
 
-	/** @type {import("@cloudflare/workers-types").WebSocket[]} */
-	// @ts-ignore
-	const 套接字对 = new WebSocketPair();
-	const [客户端, 套接字] = Object.values(套接字对);
+  if (cleanedRaw.includes('://')) {
+    const u = new URL(raw);
+    hostname = u.hostname;
+    port = u.port || (u.protocol === 'http:' ? 80 : 1080);
+    const auth = u.username || u.password ? `${u.username}:${u.password}` : u.username;
+    if (auth && auth.includes(':')) [username, password] = auth.split(':');
+  } else {
+    let authPart = '', hostPart = cleanedRaw;
+    const at = cleanedRaw.lastIndexOf('@');
+    if (at !== -1) { authPart = cleanedRaw.substring(0, at); hostPart = cleanedRaw.substring(at + 1); }
 
-	套接字.accept();
+    if (authPart && !authPart.includes(':')) {
+      try { 
+        const dec = atob(authPart.replace(/%3D/g, '=').padEnd(authPart.length + (4 - authPart.length % 4) % 4, '=')); 
+        const p = dec.split(':'); if (p.length === 2) [username, password] = p; 
+      } catch {}
+    }
+    if (!username && authPart && authPart.includes(':')) [username, password] = authPart.split(':');
 
-	let 地址 = '';
-	let 端口日志 = '';
-	const 记录 = (/** @type {string} */ 信息, /** @type {string | undefined} */ 事件) => {
-		console.log(`[${地址}:${端口日志}] ${信息}`, 事件 || '');
-	};
-	const 前置数据头 = request.headers.get('sec-websocket-protocol') || '';
+    const [h, p] = parseAddressPort(hostPart);
+    hostname = h; port = p || 1080;
+  }
 
-	const 可读套接字流 = 创建可读套接字流(套接字, 前置数据头, 记录);
+  if (!hostname || isNaN(port)) throw new Error("Invalid proxy config");
+  return { username, password, hostname, port };
+};
 
-	/** @type {{ value: import("@cloudflare/workers-types").Socket | null}}*/
-	let 远端套接字包装 = {
-		value: null,
-	};
-	let 是域名解析 = false;
-
-	// 套接字 --> 远端
-	可读套接字流.pipeTo(new WritableStream({
-		async write(数据块, controller) {
-			if (是域名解析) {
-				return await 处理域名解析(数据块, 套接字, null, 记录);
-			}
-			if (远端套接字包装.value) {
-				const 写入器 = 远端套接字包装.value.writable.getWriter()
-				await 写入器.write(数据块);
-				写入器.releaseLock();
-				return;
-			}
-
-			const {
-				出错,
-				消息,
-				地址类型,
-				目标端口 = 443,
-				目标地址 = '',
-				首包偏移,
-				协议版本 = new Uint8Array([0, 0]),
-				是数据报,
-			} = 解析头部(数据块, 认证令牌);
-			地址 = 目标地址;
-			端口日志 = `${目标端口}--${Math.random()} ${是数据报 ? 'udp ' : 'tcp '
-				} `;
-			if (出错) {
-				throw new Error(消息); // CF 存在缺陷，controller.error 不会真正结束流
-				return;
-			}
-			// 若是数据报但端口不是域名解析端口，则关闭
-			if (是数据报) {
-				if (目标端口 === 53) {
-					是域名解析 = true;
-				} else {
-					throw new Error('数据报仅支持 53 端口（域名解析）'); // CF 存在缺陷，controller.error 不会真正结束流
-					return;
-				}
-			}
-			// ["版本", "附加信息长度 N"]
-			const 响应头部 = new Uint8Array([协议版本[0], 0]);
-			const 客户端首包 = 数据块.slice(首包偏移);
-
-			if (是域名解析) {
-				return 处理域名解析(客户端首包, 套接字, 响应头部, 记录);
-			}
-			处理传输出站(远端套接字包装, 地址类型, 目标地址, 目标端口, 客户端首包, 套接字, 响应头部, 记录);
-		},
-		close() {
-			记录(`可读套接字流已关闭`);
-		},
-		abort(原因) {
-			记录(`可读套接字流已中止`, JSON.stringify(原因));
-		},
-	})).catch((err) => {
-		记录('可读套接字流 pipeTo 出错', err);
-	});
-
-	return new Response(null, {
-		status: 101,
-		// @ts-ignore
-		webSocket: 客户端,
-	});
+async function socks5Connect(addressType, addressRemote, portRemote, cfg) {
+  const { username, password, hostname, port } = cfg;
+  const socket = connect({ hostname, port });
+  const writer = socket.writable.getWriter();
+  await writer.write(new Uint8Array([5, username ? 2 : 1, 0, username ? 2 : 0]));
+  const reader = socket.readable.getReader();
+  const enc = new TextEncoder();
+  let resp = (await reader.read()).value;
+  if (resp[1] === 2) {
+    const auth = new Uint8Array([1, username.length, ...enc.encode(username), password.length, ...enc.encode(password)]);
+    await writer.write(auth);
+    resp = (await reader.read()).value;
+    if (resp[1] !== 0) throw new Error("SOCKS5 auth failed");
+  }
+  let DST;
+  if (addressType === 1) DST = new Uint8Array([1, ...addressRemote.split(".").map(Number)]);
+  else if (addressType === 2) DST = new Uint8Array([3, addressRemote.length, ...enc.encode(addressRemote)]);
+  else if (addressType === 3) {
+    const bytes = addressRemote.slice(1, -1).split(':').flatMap(h => [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16)]);
+    DST = new Uint8Array([4, ...bytes]);
+  }
+  await writer.write(new Uint8Array([5, 1, 0, ...DST, (portRemote >> 8) & 0xff, portRemote & 0xff]));
+  resp = (await reader.read()).value;
+  if (resp[1] !== 0) throw new Error("SOCKS5 connect failed");
+  writer.releaseLock(); reader.releaseLock();
+  return socket;
 }
 
-/**
- * 处理出站传输连接。
- *
- * @param {any} 远端套接字
- * @param {number} 地址类型 要连接的远端地址类型。
- * @param {string} 目标地址 要连接的远端地址。
- * @param {number} 目标端口 要连接的远端端口。
- * @param {Uint8Array} 客户端首包 要写入的客户端首包数据。
- * @param {import("@cloudflare/workers-types").WebSocket} 套接字 用于挂接远端套接字的 WebSocket。
- * @param {Uint8Array} 响应头部 响应头部。
- * @param {function} 记录 日志函数。
- * @returns {Promise<void>} 远端套接字。
- */
-async function 处理传输出站(远端套接字, 地址类型, 目标地址, 目标端口, 客户端首包, 套接字, 响应头部, 记录,) {
-	async function 连接并写入(地址, 端口, 走中转 = false) {
-		/** @type {import("@cloudflare/workers-types").Socket} */
-		const 传输套接字 = 走中转 ? await 中转连接(地址类型, 地址, 端口, 记录)
-			: 连接({
-				hostname: 地址,
-				port: 端口,
-			});
-		远端套接字.value = 传输套接字;
-		记录(`已连接 ${地址}:${端口}`);
-		const 写入器 = 传输套接字.writable.getWriter();
-		await 写入器.write(客户端首包); // 首次写入，通常是 TLS 客户端问候
-		写入器.releaseLock();
-		return 传输套接字;
-	}
+async function httpConnect(addressType, addressRemote, portRemote, cfg) {
+  const { username, password, hostname, port } = cfg;
+  const sock = connect({ hostname, port });
 
-	// 若 CF 建立的传输套接字没有回传数据，则重试改走中转/回退地址
-	async function 重试() {
-		if (启用中转) {
-			传输套接字 = await 连接并写入(目标地址, 目标端口, true);
-		} else {
-			传输套接字 = await 连接并写入(回退地址 || 目标地址, 目标端口);
-		}
-		// 不论重试成功与否，都关闭套接字
-		传输套接字.closed.catch(错误 => {
-			console.log('重试传输套接字关闭出错', 错误);
-		}).finally(() => {
-			安全关闭套接字(套接字);
-		})
-		远端回传套接字(传输套接字, 套接字, 响应头部, null, 记录);
-	}
+  let req = `CONNECT ${addressRemote}:${portRemote} HTTP/1.1\r\n` +
+            `Host: ${addressRemote}:${portRemote}\r\n`;
 
-	let 传输套接字 = await 连接并写入(目标地址, 目标端口);
+  if (username && password) {
+    req += `Proxy-Authorization: Basic ${btoa(`${username}:${password}`)}\r\n`;
+  }
 
-	// 远端套接字就绪后，把回传接到套接字
-	// 远端 --> 套接字
-	远端回传套接字(传输套接字, 套接字, 响应头部, 重试, 记录);
+  req += `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36\r\n` +
+         `Connection: keep-alive\r\n\r\n`;
+
+  const writer = sock.writable.getWriter();
+  await writer.write(new TextEncoder().encode(req));
+  writer.releaseLock();
+
+  const reader = sock.readable.getReader();
+  let buf = new Uint8Array(0);
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) throw new Error("HTTP proxy closed unexpectedly");
+
+    const tmp = new Uint8Array(buf.length + value.length);
+    tmp.set(buf);
+    tmp.set(value, buf.length);
+    buf = tmp;
+    if (buf.length > 65536) throw new Error("HTTP proxy response too large"); 
+    const txt = new TextDecoder().decode(buf);
+    if (txt.includes("\r\n\r\n")) {
+      if (/^HTTP\/1\.[01] 2/i.test(txt.split("\r\n")[0])) {
+        reader.releaseLock();
+        return sock;
+      }
+      throw new Error(`HTTP proxy refused: ${txt.split("\r\n")[0]}`);
+    }
+  }
 }
 
-/**
- *
- * @param {import("@cloudflare/workers-types").WebSocket} 套接字服务端
- * @param {string} 前置数据头 用于套接字 0rtt
- * @param {(info: string)=> void} 记录 用于套接字 0rtt
- */
-function 创建可读套接字流(套接字服务端, 前置数据头, 记录) {
-	let 已取消 = false;
-	const 流 = new ReadableStream({
-		start(controller) {
-			套接字服务端.addEventListener('message', (事件) => {
-				if (已取消) {
-					return;
-				}
-				const 消息 = 事件.data;
-				controller.enqueue(消息);
-			});
+function parseProxyConfig(path) {
+  let proxyIP = null, socks5 = null, enableSocks = null, globalProxy = null;
 
-			// 该事件表示客户端已关闭 客户端->服务端 方向的流。
-			// 但服务端->客户端 方向仍然打开，直到你在服务端调用 close()。
-			// 协议规定：要彻底关闭连接，两个方向都必须各自发送关闭消息。
-			套接字服务端.addEventListener('close', () => {
-				// 客户端发来关闭，需要关闭服务端
-				// 若流已取消，则跳过 controller.close
-				安全关闭套接字(套接字服务端);
-				if (已取消) {
-					return;
-				}
-				controller.close();
-			}
-			);
-			套接字服务端.addEventListener('error', (err) => {
-				记录('套接字服务端出错');
-				controller.error(err);
-			}
-			);
-			// 用于套接字 0rtt
-			const { 前置数据, error } = 六四转字节缓冲(前置数据头);
-			if (error) {
-				controller.error(error);
-			} else if (前置数据) {
-				controller.enqueue(前置数据);
-			}
-		},
+  const globalMatch = path.match(/^\/SOCKS5(?:[:=]|\/\/)?([^/#?]+)/i);
+  if (globalMatch) {
+    const cfg = socks5AddressParser(globalMatch[1]);
+    globalProxy = { type: 'socks5', cfg };
+    return { proxyIP, socks5, enableSocks, globalProxy };
+  } else if (SOCKS5_GLOBAL) {
+    const builtInGlobalMatch = SOCKS5_GLOBAL.match(/(socks5?|https?):\/\/(.+)/i);
+    if (builtInGlobalMatch) {
+      const cfg = socks5AddressParser(builtInGlobalMatch[2]);
+      globalProxy = { type: 'socks5', cfg };
+      return { proxyIP, socks5, enableSocks, globalProxy };
+    }
+  }
 
-		pull(controller) {
-			// 若套接字满时可停止读取，则可以实现背压
-			// https://streams.spec.whatwg.org/#example-rs-push-backpressure
-		},
-		cancel(原因) {
-			// 1. 管道的 WritableStream 出错时会触发 cancel，因此套接字的服务端关闭会走到这里
-			// 2. 若可读流已取消，则所有 controller.close/enqueue 都要跳过
-			// 3. 但经测试，即便可读流已取消，controller.error 仍然有效
-			if (已取消) {
-				return;
-			}
-			记录(`可读流被取消，原因：${原因}`)
-			已取消 = true;
-			安全关闭套接字(套接字服务端);
-		}
-	});
+  const proxyIpMatch = path.match(/^\/ProxyIP[=\/]([^?#]+)/i);
+  if (proxyIpMatch) {
+    const seg = proxyIpMatch[1];
+    if (seg.includes('@') || seg.includes('socks')) {
+      socks5 = socks5AddressParser(seg);
+      enableSocks = 'socks5';
+    } else {
+      const [addr, port = 443] = parseAddressPort(seg);
+      proxyIP = { address: addr.includes('[') ? addr.slice(1, -1) : addr, port: +port };
+    }
+  } else {
+    if (SOCKS5) {
+      socks5 = socks5AddressParser(SOCKS5);
+      enableSocks = 'socks5';
+    }
+    if (PROXYIP) {
+      const [addr, port = 443] = parseAddressPort(PROXYIP);
+      proxyIP = { address: addr.includes('[') ? addr.slice(1, -1) : addr, port: +port };
+    }
+  }
 
-	return 流;
-
+  return { proxyIP, socks5, enableSocks, globalProxy };
 }
 
-
-/**
- *
- * @param { ArrayBuffer} 数据缓冲
- * @param {string} 认证令牌
- * @returns
- */
-function 解析头部(
-	数据缓冲,
-	认证令牌
-) {
-	if (数据缓冲.byteLength < 24) {
-		return {
-			出错: true,
-			消息: '数据不合法',
-		};
-	}
-	const 版本 = new Uint8Array(数据缓冲.slice(0, 1));
-	let 令牌有效 = false;
-	let 是数据报 = false;
-	if (字节转文本(new Uint8Array(数据缓冲.slice(1, 17))) === 认证令牌) {
-		令牌有效 = true;
-	}
-	if (!令牌有效) {
-		return {
-			出错: true,
-			消息: '令牌无效',
-		};
-	}
-
-	const 附加长度 = new Uint8Array(数据缓冲.slice(17, 18))[0];
-	// 暂时跳过附加信息
-
-	const 命令 = new Uint8Array(
-		数据缓冲.slice(18 + 附加长度, 18 + 附加长度 + 1)
-	)[0];
-
-	// 0x01 传输
-	// 0x02 数据报
-	// 0x03 多路复用
-	if (命令 === 1) {
-	} else if (命令 === 2) {
-		是数据报 = true;
-	} else {
-		return {
-			出错: true,
-			消息: `命令 ${命令} 不支持，仅支持 01-传输 / 02-数据报 / 03-多路复用`,
-		};
-	}
-	const 端口偏移 = 18 + 附加长度 + 1;
-	const 端口缓冲 = 数据缓冲.slice(端口偏移, 端口偏移 + 2);
-	// 端口在原始数据里是大端序，例如 80 == 0x005d
-	const 目标端口 = new DataView(端口缓冲).getUint16(0);
-
-	let 地址偏移 = 端口偏移 + 2;
-	const 地址缓冲 = new Uint8Array(
-		数据缓冲.slice(地址偏移, 地址偏移 + 1)
-	);
-
-	// 1--> IPv4  地址长度 = 4
-	// 2--> 域名   地址长度 = 地址缓冲[1]
-	// 3--> IPv6  地址长度 = 16
-	const 地址类型 = 地址缓冲[0];
-	let 地址长度 = 0;
-	let 地址值偏移 = 地址偏移 + 1;
-	let 目标地址 = '';
-	switch (地址类型) {
-		case 1:
-			地址长度 = 4;
-			目标地址 = new Uint8Array(
-				数据缓冲.slice(地址值偏移, 地址值偏移 + 地址长度)
-			).join('.');
-			break;
-		case 2:
-			地址长度 = new Uint8Array(
-				数据缓冲.slice(地址值偏移, 地址值偏移 + 1)
-			)[0];
-			地址值偏移 += 1;
-			目标地址 = new TextDecoder().decode(
-				数据缓冲.slice(地址值偏移, 地址值偏移 + 地址长度)
-			);
-			break;
-		case 3:
-			地址长度 = 16;
-			const 数据视图 = new DataView(
-				数据缓冲.slice(地址值偏移, 地址值偏移 + 地址长度)
-			);
-			// 2001:0db8:85a3:0000:0000:8a2e:0370:7334
-			const 六段地址 = [];
-			for (let 索引 = 0; 索引 < 8; 索引++) {
-				六段地址.push(数据视图.getUint16(索引 * 2).toString(16));
-			}
-			目标地址 = 六段地址.join(':');
-			// IPv6 似乎无需加方括号
-			break;
-		default:
-			return {
-				出错: true,
-				消息: `地址类型不合法：${地址类型}`,
-			};
-	}
-	if (!目标地址) {
-		return {
-			出错: true,
-			消息: `地址为空，地址类型是 ${地址类型}`,
-		};
-	}
-
-	return {
-		出错: false,
-		目标地址: 目标地址,
-		地址类型,
-		目标端口,
-		首包偏移: 地址值偏移 + 地址长度,
-		协议版本: 版本,
-		是数据报,
-	};
+class Pool {
+  constructor() { this.buf = new ArrayBuffer(16384); this.ptr = 0; this.pool = []; this.max = 8; this.large = false; }
+  alloc = s => {
+    if (s <= 4096 && s <= 16384 - this.ptr) { const v = new Uint8Array(this.buf, this.ptr, s); this.ptr += s; return v; } const r = this.pool.pop();
+    if (r && r.byteLength >= s) return new Uint8Array(r.buffer, 0, s); return new Uint8Array(s);
+  };
+  free = b => {
+    if (b.buffer === this.buf) { this.ptr = Math.max(0, this.ptr - b.length); return; }
+    if (this.pool.length < this.max && b.byteLength >= 1024) this.pool.push(b);
+  }; enableLarge = () => { this.large = true; }; reset = () => { this.ptr = 0; this.pool.length = 0; this.large = false; };
 }
 
+const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
+  const pool = new Pool(); let sock, w, r, info, first = true, rxBytes = 0, stalls = 0, reconns = 0;
+  let lastAct = Date.now(), conn = false, reading = false; const tmrs = {}, pend = [];
+  let pendBytes = 0, score = 1.0, lastChk = Date.now(), lastRx = 0, succ = 0, fail = 0;
+  let stats = { tot: 0, cnt: 0, big: 0, win: 0, ts: Date.now() }; let mode = 'adaptive', avgSz = 0, tputs = [];
 
-/**
- *
- * @param {import("@cloudflare/workers-types").Socket} 远端套接字
- * @param {import("@cloudflare/workers-types").WebSocket} 套接字
- * @param {ArrayBuffer} 响应头部
- * @param {(() => Promise<void>) | null} 重试
- * @param {*} 记录
- */
-async function 远端回传套接字(远端套接字, 套接字, 响应头部, 重试, 记录) {
-	// 远端 --> 套接字
-	let 远端块计数 = 0;
-	let 块列表 = [];
-	/** @type {ArrayBuffer | null} */
-	let 头部 = 响应头部;
-	let 有回传数据 = false; // 检查远端套接字是否有回传数据
-	await 远端套接字.readable
-		.pipeTo(
-			new WritableStream({
-				start() {
-				},
-				/**
-				 *
-				 * @param {Uint8Array} 数据块
-				 * @param {*} controller
-				 */
-				async write(数据块, controller) {
-					有回传数据 = true;
-					// 远端块计数++;
-					if (套接字.readyState !== 套接字状态_打开) {
-						controller.error(
-							'套接字状态不是打开，可能已关闭'
-						);
-					}
-					if (头部) {
-						套接字.send(await new Blob([头部, 数据块]).arrayBuffer());
-						头部 = null;
-					} else {
-						// 似乎无需限速，CF 好像已修复此问题
-						套接字.send(数据块);
-					}
-				},
-				close() {
-					记录(`远端可读流已关闭，是否有回传数据：${有回传数据}`);
-					// 无需服务端先关套接字，某些情况下会导致 HTTP ERR_CONTENT_LENGTH_MISMATCH，客户端总会发关闭事件
-				},
-				abort(原因) {
-					console.error(`远端可读流已中止`, 原因);
-				},
-			})
-		)
-		.catch((错误) => {
-			console.error(
-				`远端回传套接字异常 `,
-				错误.stack || 错误
-			);
-			安全关闭套接字(套接字);
-		});
+  const updateMode = s => {
+    stats.tot += s; stats.cnt++; if (s > 8192) stats.big++; avgSz = avgSz * 0.9 + s * 0.1; const now = Date.now();
+    if (now - stats.ts > 1000) {
+      const rate = stats.win; tputs.push(rate); if (tputs.length > 5) tputs.shift(); stats.win = s; stats.ts = now;
+      const avg = tputs.reduce((a, b) => a + b, 0) / tputs.length;
+      if (stats.cnt >= 20) {
+        if (avg < 8388608 || avgSz < 4096) { if (mode !== 'buffered') { mode = 'buffered'; pool.enableLarge(); } }
+        else if (avg > 16777216 && avgSz > 12288) { if (mode !== 'direct') mode = 'direct'; }
+        else { if (mode !== 'adaptive') mode = 'adaptive'; }
+      }} else { stats.win += s; }
+  };
 
-	// 似乎是 CF 建立套接字出错的情况：
-	// 1. Socket.closed 会带错误
-	// 2. Socket.readable 会在没有任何数据到达时关闭
-	if (有回传数据 === false && 重试) {
-		记录(`重试`)
-		重试();
-	}
-}
+  const readLoop = async () => {
+    if (reading) return; reading = true; let batch = [], bSz = 0, bTmr = null;
+    const flush = () => {
+      if (!bSz) return; const m = new Uint8Array(bSz); let p = 0;
+      for (const c of batch) { m.set(c, p); p += c.length; }
+      if (ws.readyState === 1) ws.send(m);
+      batch = []; bSz = 0; if (bTmr) { clearTimeout(bTmr); bTmr = null; }
+    };
+    try {
+      while (true) {
+        if (pendBytes > MAX_PENDING) { await new Promise(res => setTimeout(res, 100)); continue; }
+        const { done, value: v } = await r.read();
+        if (v?.length) {
+          rxBytes += v.length; lastAct = Date.now(); stalls = 0; updateMode(v.length); const now = Date.now();
+          if (now - lastChk > 5000) {
+            const el = now - lastChk, by = rxBytes - lastRx, tp = by / el;
+            if (tp > 500) score = Math.min(1.0, score + 0.05);
+            else if (tp < 50) score = Math.max(0.1, score - 0.05);
+            lastChk = now; lastRx = rxBytes;
+          }
+          if (mode === 'buffered') {
+            if (v.length < 16384) {
+              batch.push(v); bSz += v.length;
+              if (bSz >= 65536) flush();
+              else if (!bTmr) bTmr = setTimeout(flush, avgSz > 8192 ? 8 : 25);
+            } else { flush(); if (ws.readyState === 1) ws.send(v); }
+          } else if (mode === 'direct') { flush(); if (ws.readyState === 1) ws.send(v);
+          } else if (mode === 'adaptive') {
+            if (v.length < 8192) {
+              batch.push(v); bSz += v.length;
+              if (bSz >= 49152) flush();
+              else if (!bTmr) bTmr = setTimeout(flush, 12);
+            } else { flush(); if (ws.readyState === 1) ws.send(v); } }
+        } if (done) { flush(); reading = false; reconn(); break; }
+      }} catch (e) { flush(); if (bTmr) clearTimeout(bTmr); reading = false; fail++; reconn(); }
+  };
 
-/**
- *
- * @param {string} 文本
- * @returns
- */
-function 六四转字节缓冲(文本) {
-	if (!文本) {
-		return { error: null };
-	}
-	try {
-		// Go 使用 rfc4648 的 URL 安全 base64，而 js 的 atob 不支持，需要先替换
-		文本 = 文本.replace(/-/g, '+').replace(/_/g, '/');
-		const 解码 = atob(文本);
-		const 字节缓冲 = Uint8Array.from(解码, (字符) => 字符.charCodeAt(0));
-		return { 前置数据: 字节缓冲.buffer, error: null };
-	} catch (error) {
-		return { error };
-	}
-}
+  const tryConnect = async (host, port, addressType) => {
+    if (globalProxy) {
+      if (globalProxy.type === 'socks5')
+        return await socks5Connect(addressType, host, port, globalProxy.cfg);
+      if (globalProxy.type === 'http')
+        return await httpConnect(addressType, host, port, globalProxy.cfg);
+    } 
 
-/**
- * 这不是严格的 UUID 校验
- * @param {string} 令牌
- */
-function 校验令牌格式(令牌) {
-	const 令牌正则 = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-	return 令牌正则.test(令牌);
-}
+    // 判断如果目标为域名且命中了热门 AI 列表，则通过 DoH 解析 A 记录强制转为 IPv4
+    let targetHost = host;
+    if (addressType === 2 && isAiDomain(host)) {
+      targetHost = await resolveIPv4(host);
+    }
 
-const 套接字状态_打开 = 1;
-const 套接字状态_关闭中 = 2;
-/**
- * 正常情况下套接字关闭不会抛异常。
- * @param {import("@cloudflare/workers-types").WebSocket} 套接字
- */
-function 安全关闭套接字(套接字) {
-	try {
-		if (套接字.readyState === 套接字状态_打开 || 套接字.readyState === 套接字状态_关闭中) {
-			套接字.close();
-		}
-	} catch (error) {
-		console.error('安全关闭套接字出错', error);
-	}
-}
+    // 其它流量直接保留原有逻辑（Cloudflare 默认双栈优先以 IPv6 出站）
+    try {
+      const socket = connect({ hostname: targetHost, port });
+      if (socket.opened) await socket.opened;
+      return socket;
+    } catch (err) {
+      if (!socks5 && !proxyIP) throw err;
 
-const 字节十六进制表 = [];
-for (let 索引 = 0; 索引 < 256; ++索引) {
-	字节十六进制表.push((索引 + 256).toString(16).slice(1));
-}
-function 字节转文本_不校验(字节数组, 偏移 = 0) {
-	return (字节十六进制表[字节数组[偏移 + 0]] + 字节十六进制表[字节数组[偏移 + 1]] + 字节十六进制表[字节数组[偏移 + 2]] + 字节十六进制表[字节数组[偏移 + 3]] + "-" + 字节十六进制表[字节数组[偏移 + 4]] + 字节十六进制表[字节数组[偏移 + 5]] + "-" + 字节十六进制表[字节数组[偏移 + 6]] + 字节十六进制表[字节数组[偏移 + 7]] + "-" + 字节十六进制表[字节数组[偏移 + 8]] + 字节十六进制表[字节数组[偏移 + 9]] + "-" + 字节十六进制表[字节数组[偏移 + 10]] + 字节十六进制表[字节数组[偏移 + 11]] + 字节十六进制表[字节数组[偏移 + 12]] + 字节十六进制表[字节数组[偏移 + 13]] + 字节十六进制表[字节数组[偏移 + 14]] + 字节十六进制表[字节数组[偏移 + 15]]).toLowerCase();
-}
-function 字节转文本(字节数组, 偏移 = 0) {
-	const 令牌 = 字节转文本_不校验(字节数组, 偏移);
-	if (!校验令牌格式(令牌)) {
-		throw TypeError("还原出的令牌不合法");
-	}
-	return 令牌;
-}
+      if (socks5) {
+        try {
+          const localSocket = enableSocks === 'http'
+            ? await httpConnect(addressType, host, port, socks5)
+            : await socks5Connect(addressType, host, port, socks5);
+          if (localSocket.opened) await localSocket.opened;
+          return localSocket;
+        } catch {}
+      }
 
-/**
- *
- * @param {ArrayBuffer} 报文数据
- * @param {import("@cloudflare/workers-types").WebSocket} 套接字
- * @param {ArrayBuffer} 响应头部
- * @param {(string)=> void} 记录
- */
-async function 处理域名解析(报文数据, 套接字, 响应头部, 记录) {
-	// 无论客户端发来哪个解析服务器，都固定使用硬编码的那个
-	// 因为部分解析服务器不支持基于传输层的查询
-	try {
-		const 解析服务器 = '8.8.4.4'; // 等 CF 修复连接自身 IP 的问题后可改 1.1.1.1
-		const 解析端口 = 53;
-		/** @type {ArrayBuffer | null} */
-		let 头部 = 响应头部;
-		/** @type {import("@cloudflare/workers-types").Socket} */
-		const 传输套接字 = 连接({
-			hostname: 解析服务器,
-			port: 解析端口,
-		});
+      if (proxyIP) {
+        try {
+          const proxySocket = connect({ hostname: proxyIP.address, port: proxyIP.port });
+          if (proxySocket.opened) await proxySocket.opened;
+          return proxySocket;
+        } catch {}
+      }
 
-		记录(`已连接 ${解析服务器}:${解析端口}`);
-		const 写入器 = 传输套接字.writable.getWriter();
-		await 写入器.write(报文数据);
-		写入器.releaseLock();
-		await 传输套接字.readable.pipeTo(new WritableStream({
-			async write(数据块) {
-				if (套接字.readyState === 套接字状态_打开) {
-					if (头部) {
-						套接字.send(await new Blob([头部, 数据块]).arrayBuffer());
-						头部 = null;
-					} else {
-						套接字.send(数据块);
-					}
-				}
-			},
-			close() {
-				记录(`解析服务器(${解析服务器})连接已关闭`);
-			},
-			abort(原因) {
-				console.error(`解析服务器(${解析服务器})连接已中止`, 原因);
-			},
-		}));
-	} catch (错误) {
-		console.error(
-			`处理域名解析异常，错误：${错误.message}`
-		);
-	}
-}
+      throw err; 
+    }
+  };
 
-/**
- *
- * @param {number} 地址类型
- * @param {string} 目标地址
- * @param {number} 目标端口
- * @param {function} 记录 日志函数。
- */
-async function 中转连接(地址类型, 目标地址, 目标端口, 记录) {
-	const { 用户名, 密码, 主机名, 端口 } = 中转配置;
-	// 连接中转服务器
-	const 套接字 = 连接({
-		hostname: 主机名,
-		port: 端口,
-	});
+  const processFirstChunk = (b) => {
+    if (buildUUID(b, 1) !== UUID) throw new Error('Auth failed');
+    const { host, port, payload, addressType } = extractAddr(b);
+    info = { host, port, addressType };
+    ws.send(new Uint8Array([b[0], 0]));
+    conn = true;
+    if (payload.length) {
+      const buf = pool.alloc(payload.length); buf.set(payload);
+      pend.push(buf); pendBytes += buf.length;
+    }
+    startTmrs();
+    establish();
+  };
 
-	// 握手请求头格式（本端 -> 中转服务器）：
-	// +----+----------+----------+
-	// |版本 | 方法数量  |  方法列表 |
-	// +----+----------+----------+
-	// | 1  |    1     | 1 to 255 |
-	// +----+----------+----------+
+  const establish = async () => {
+    try {
+      sock = await tryConnect(info.host, info.port, info.addressType);
+      if (sock.opened) await sock.opened;
+      w = sock.writable.getWriter();
+      r = sock.readable.getReader();
 
-	// 方法取值：
-	// 0x00 无需认证
-	// 0x02 用户名/密码认证
-	const 握手问候 = new Uint8Array([5, 2, 0, 2]);
+      const bt = pend.splice(0, 10);
+      for (const b of bt) { await w.write(b); pendBytes -= b.length; pool.free(b); }
+      conn = false; reconns = 0; score = Math.min(1.0, score + 0.15); succ++; lastAct = Date.now(); readLoop();
+    } catch (e) { conn = false; fail++; score = Math.max(0.1, score - 0.2); reconn(); }
+  };
 
-	const 写入器 = 套接字.writable.getWriter();
+  const reconn = async () => {
+    if (!info || ws.readyState !== 1) { cleanup(); ws.close(1011, 'Invalid.'); return; }
+    if (reconns >= MAX_RECONN) { cleanup(); ws.close(1011, 'Max reconnect.'); return; }
+    if (score < 0.3 && reconns > 5 && Math.random() > 0.6) { cleanup(); ws.close(1011, 'Poor network.'); return; }
+    if (conn) return; reconns++; let d = Math.min(50 * Math.pow(1.5, reconns - 1), 3000);
+    d *= (1.5 - score * 0.5); d += (Math.random() - 0.5) * d * 0.2; d = Math.max(50, Math.floor(d));
+    try {
+      cleanSock();
+      if (pendBytes > MAX_PENDING * 2) {
+        while (pendBytes > MAX_PENDING && pend.length > 5) { const drop = pend.shift(); pendBytes -= drop.length; pool.free(drop); }
+      }
+      await new Promise(res => setTimeout(res, d)); conn = true;
+      sock = await tryConnect(info.host, info.port, info.addressType); 
+      w = sock.writable.getWriter(); r = sock.readable.getReader(); const bt = pend.splice(0, 10);
+      for (const b of bt) { await w.write(b); pendBytes -= b.length; pool.free(b); }
+      conn = false; reconns = 0; score = Math.min(1.0, score + 0.15); succ++; stalls = 0; lastAct = Date.now(); readLoop();
+    } catch (e) { conn = false; fail++; score = Math.max(0.1, score - 0.2);
+      if (reconns < MAX_RECONN && ws.readyState === 1) setTimeout(reconn, 500);
+      else { cleanup(); ws.close(1011, 'Exhausted.'); }}
+  };
 
-	await 写入器.write(握手问候);
-	记录('已发送握手问候');
+  const startTmrs = () => {
+    tmrs.ka = setInterval(async () => {
+      if (!conn && w && Date.now() - lastAct > KEEPALIVE) { try { await w.write(new Uint8Array(0)); lastAct = Date.now(); } catch (e) { reconn(); }}
+    }, KEEPALIVE / 3);
+    tmrs.hc = setInterval(() => {
+      if (!conn && stats.tot > 0 && Date.now() - lastAct > STALL_TO) { stalls++;
+        if (stalls >= MAX_STALL) {
+          if (reconns < MAX_RECONN) { stalls = 0; reconn(); }
+          else { cleanup(); ws.close(1011, 'Stall.'); }
+        }}}, STALL_TO / 2);
+  };
 
-	const 读取器 = 套接字.readable.getReader();
-	const 编码器 = new TextEncoder();
-	let 响应 = (await 读取器.read()).value;
-	// 响应格式（中转服务器 -> 本端）：
-	// +----+--------+
-	// |版本 |  方法  |
-	// +----+--------+
-	// | 1  |   1    |
-	// +----+--------+
-	if (响应[0] !== 0x05) {
-		记录(`中转服务器版本错误：${响应[0]}，期望：5`);
-		return;
-	}
-	if (响应[1] === 0xff) {
-		记录("没有可接受的认证方法");
-		return;
-	}
+  const cleanSock = () => { reading = false; try { w?.releaseLock(); r?.releaseLock(); sock?.close(); } catch {} };
+  const cleanup = (code, reason) => {
+    Object.values(tmrs).forEach(clearInterval); cleanSock();
+    while (pend.length) pool.free(pend.shift());
+    pendBytes = 0; stats = { tot: 0, cnt: 0, big: 0, win: 0, ts: Date.now() };
+    mode = 'adaptive'; avgSz = 0; tputs = []; pool.reset();
+    if (ws.readyState === 1) ws.close(code, reason);
+  };
 
-	// 若返回 0x0502
-	if (响应[1] === 0x02) {
-		记录("中转服务器需要认证");
-		if (!用户名 || !密码) {
-			记录("请提供用户名/密码");
-			return;
-		}
-		// +----+------+----------+------+----------+
-		// |版本 | 用户名长度|  用户名   | 密码长度 |  密码  |
-		// +----+------+----------+------+----------+
-		// | 1  |  1   | 1 to 255 |  1   | 1 to 255 |
-		// +----+------+----------+------+----------+
-		const 认证请求 = new Uint8Array([
-			1,
-			用户名.length,
-			...编码器.encode(用户名),
-			密码.length,
-			...编码器.encode(密码)
-		]);
-		await 写入器.write(认证请求);
-		响应 = (await 读取器.read()).value;
-		// 期望 0x0100
-		if (响应[0] !== 0x01 || 响应[1] !== 0x00) {
-			记录("中转服务器认证失败");
-			return;
-		}
-	}
+  if (earlyData) {
+    first = false;
+    try {
+      processFirstChunk(earlyData);
+    } catch (err) {
+      cleanup();
+      ws.close(1006, 'Error.');
+      return;
+    }
+  }
 
-	// 请求数据格式（本端 -> 中转服务器）：
-	// +----+-----+-------+------+----------+----------+
-	// |版本 | 命令 |  保留  | 地址型 | 目标地址  | 目标端口  |
-	// +----+-----+-------+------+----------+----------+
-	// | 1  |  1  | X'00' |  1   | 可变      |    2     |
-	// +----+-----+-------+------+----------+----------+
-	// 地址型：后续地址的类型
-	// 0x01：IPv4 地址
-	// 0x03：域名
-	// 0x04：IPv6 地址
-	// 目标地址：期望连接的目标地址
-	// 目标端口：期望连接的目标端口（网络字节序）
-
-	// 地址类型
-	// 1--> IPv4  地址长度 = 4
-	// 2--> 域名
-	// 3--> IPv6  地址长度 = 16
-	let 目标地址报文;	// 目标地址报文 = 地址型 + 目标地址
-	switch (地址类型) {
-		case 1:
-			目标地址报文 = new Uint8Array(
-				[1, ...目标地址.split('.').map(Number)]
-			);
-			break;
-		case 2:
-			目标地址报文 = new Uint8Array(
-				[3, 目标地址.length, ...编码器.encode(目标地址)]
-			);
-			break;
-		case 3:
-			目标地址报文 = new Uint8Array(
-				[4, ...目标地址.split(':').flatMap(段 => [parseInt(段.slice(0, 2), 16), parseInt(段.slice(2), 16)])]
-			);
-			break;
-		default:
-			记录(`地址类型不合法：${地址类型}`);
-			return;
-	}
-	const 连接请求 = new Uint8Array([5, 1, 0, ...目标地址报文, 目标端口 >> 8, 目标端口 & 0xff]);
-	await 写入器.write(连接请求);
-	记录('已发送连接请求');
-
-	响应 = (await 读取器.read()).value;
-	// 响应格式（中转服务器 -> 本端）：
-	// +----+-----+-------+------+----------+----------+
-	// |版本 | 应答 |  保留  | 地址型 | 绑定地址  | 绑定端口  |
-	// +----+-----+-------+------+----------+----------+
-	// | 1  |  1  | X'00' |  1   | 可变      |    2     |
-	// +----+-----+-------+------+----------+----------+
-	if (响应[1] === 0x00) {
-		记录("中转连接已建立");
-	} else {
-		记录("中转连接建立失败");
-		return;
-	}
-	写入器.releaseLock();
-	读取器.releaseLock();
-	return 套接字;
-}
-
-
-/**
- *
- * @param {string} 地址
- */
-function 解析中转地址(地址) {
-	let [后段, 前段] = 地址.split("@").reverse();
-	let 用户名, 密码, 主机名, 端口;
-	if (前段) {
-		const 前段列表 = 前段.split(":");
-		if (前段列表.length !== 2) {
-			throw new Error('中转地址格式不合法');
-		}
-		[用户名, 密码] = 前段列表;
-	}
-	const 后段列表 = 后段.split(":");
-	端口 = Number(后段列表.pop());
-	if (isNaN(端口)) {
-		throw new Error('中转地址格式不合法');
-	}
-	主机名 = 后段列表.join(":");
-	const 正则 = /^\[.*\]$/;
-	if (主机名.includes(":") && !正则.test(主机名)) {
-		throw new Error('中转地址格式不合法');
-	}
-	return {
-		用户名,
-		密码,
-		主机名,
-		端口,
-	}
-}
-
-/**
- * 按配置区「优选地址」收集连接用地址。
- * 每一项可以是 host:port，也可以是在线列表的 URL（逐行 host:port#备注）。
- * @param {string} 主机名 访问域名，作兜底
- * @returns {Promise<Array<{地址: string, 端口: string, 备注: string}>>}
- */
-async function 收集优选地址(主机名) {
-	const 结果 = [];
-	const 已见 = new Set();
-	const 加入 = (原始) => {
-		const 文本 = (原始 || '').trim();
-		if (!文本) return;
-		const 井号分割 = 文本.split('#');
-		const 备注 = 井号分割.length > 1 ? 井号分割.slice(1).join('#').trim() : '';
-		const 地址端口 = 井号分割[0].trim();
-		if (!地址端口) return;
-		let 地址;
-		let 端口;
-		const 六 = 地址端口.match(/^\[(.+)\]:(\d+)$/);
-		if (六) {
-			地址 = 六[1];
-			端口 = 六[2];
-		} else if (地址端口.includes(':') && 地址端口.split(':').length === 2) {
-			[地址, 端口] = 地址端口.split(':');
-		} else {
-			地址 = 地址端口;
-			端口 = '443';
-		}
-		地址 = (地址 || '').trim();
-		端口 = (端口 || '443').trim();
-		if (!地址) return;
-		const 键 = `${地址}:${端口}`;
-		if (已见.has(键)) return;
-		已见.add(键);
-		结果.push({ 地址, 端口, 备注: 备注 || 键 });
-	};
-
-	// 分隔符兼容中英文逗号
-	const 配置项列表 = (优选地址 || '').split(/[,，]/).map((项) => 项.trim()).filter((项) => 项);
-	for (const 配置项 of 配置项列表) {
-		if (/^https?:\/\//i.test(配置项)) {
-			try {
-				const 响应 = await fetch(配置项, { cf: { cacheTtl: 300 } });
-				if (响应.ok) {
-					const 正文 = await 响应.text();
-					for (const 行 of 正文.split('\n')) 加入(行);
-				}
-			} catch (err) {
-				// 拉取失败就跳过这条 URL
-			}
-		} else {
-			加入(配置项);
-		}
-	}
-
-	if (结果.length === 0 && 主机名) 加入(主机名);
-	return 结果;
-}
-
-/**
- * 生成订阅内容：为「优选地址」里每个地址各生成一条节点，连接走优选地址，
- * TLS 握手与 WS host 仍用访问域名，最后整体 base64 编码，可直接订阅。
- * @param {string} 认证令牌
- * @param {string | null} 主机名 访问域名
- * @returns {Promise<string>}
- */
-async function 生成订阅配置(认证令牌, 主机名) {
-	const 协议 = 解码64('dmxlc3M=');
-	const 域名 = 主机名 || '';
-	// CF 的明文端口走 ws（不加密），其余端口走 wss（TLS），据此自动切换
-	const 明文端口 = [80, 8080, 8880, 2052, 2082, 2086, 2095];
-	const 地址列表 = await 收集优选地址(域名);
-	const 链接列表 = 地址列表.map((项) => {
-		const 安全地址 = 项.地址.includes(':') ? `[${项.地址}]` : 项.地址;
-		const 是明文 = 明文端口.includes(Number(项.端口));
-		// randomized fingerprint may cause TLS compatibility issues with some Xray/uTLS clients.
-		// Use chrome as default for better compatibility.
-		const 安全参数 = 是明文
-			? 'security=none'
-			: `security=tls&sni=${域名}&fp=chrome`;
-		return `${协议}://${认证令牌}@${安全地址}:${项.端口}` +
-			`?encryption=none&${安全参数}&type=ws&host=${域名}&path=%2F%3Fed%3D2048` +
-			`#${encodeURIComponent(项.备注)}`;
-	});
-	return btoa(链接列表.join('\n'));
-}
+  ws.addEventListener('message', async e => {
+    try {
+      if (first) {
+        first = false;
+        processFirstChunk(new Uint8Array(e.data));
+      } else { 
+        lastAct = Date.now();
+        if (conn || !w) { const buf = pool.alloc(e.data.byteLength); buf.set(new Uint8Array(e.data)); pend.push(buf); pendBytes += buf.length; }
+        else { await w.write(e.data); }
+      }
+    } catch (err) { cleanup(); ws.close(1006, 'Error.'); }
+  });
+  ws.addEventListener('close', cleanup);
+  ws.addEventListener('error', cleanup);
+};
