@@ -1,4 +1,4 @@
-// 国外热门 AI 平台名单（强制走 DoH IPv4 出站防拦截）
+// 国外热门 AI 平台名单（通过 DoH 强制查询 AAAA 记录走 IPv6）
 const AI_DOMAINS = [
   'openai.com',
   'chatgpt.com',
@@ -23,21 +23,22 @@ function isAiDomain(domain) {
   return AI_DOMAINS.some(k => lower.includes(k));
 }
 
-// DoH 查询 IPv4 (A 记录)
-async function resolveIPv4(domain) {
+// DoH 查询 IPv6 (AAAA 记录，type=28)
+async function resolveIPv6(domain) {
   if (!domain || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(domain) || domain.includes(':')) {
     return domain;
   }
   try {
-    const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=A`, {
+    const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=AAAA`, {
       headers: { 'accept': 'application/dns-json' },
       cf: { cacheTtl: 300 }
     });
     if (!res.ok) return domain;
     const data = await res.json();
-    const records = data.Answer?.filter(a => a.type === 1);
+    const records = data.Answer?.filter(a => a.type === 28);
     if (records && records.length > 0) {
-      return records[Math.floor(Math.random() * records.length)].data;
+      const ipv6Addr = records[Math.floor(Math.random() * records.length)].data;
+      return ipv6Addr.startsWith('[') ? ipv6Addr : `[${ipv6Addr}]`;
     }
   } catch (e) {}
   return domain;
@@ -318,13 +319,12 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
         return await httpConnect(addressType, host, port, globalProxy.cfg);
     } 
 
-    // 判断如果目标为域名且命中了热门 AI 列表，则通过 DoH 解析 A 记录强制转为 IPv4
+    // 如果命中 AI 域名，主动发起 DoH 查询 AAAA 记录，强制解析并走 IPv6
     let targetHost = host;
     if (addressType === 2 && isAiDomain(host)) {
-      targetHost = await resolveIPv4(host);
+      targetHost = await resolveIPv6(host);
     }
 
-    // 其它流量直接保留原有逻辑（Cloudflare 默认双栈优先以 IPv6 出站）
     try {
       const socket = connect({ hostname: targetHost, port });
       if (socket.opened) await socket.opened;
