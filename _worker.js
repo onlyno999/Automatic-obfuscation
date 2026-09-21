@@ -4,7 +4,7 @@ import { connect as 连接 } from 'cloudflare:sockets';
 // 认证令牌：即连接用的 UUID。生成方式：Windows 下执行 Powershell -Command "[guid]::NewGuid()"
 let 认证令牌 = '2541f8d4-d157-46af-9169-0025bf435fbc';
 // 回退地址：直连失败时改走的地址，留空表示不启用
-let 回退地址 = 'wok.woxxxxx.nyc.mn';
+let 回退地址 = 'wok.woxxxxxx.nyc.mn';
 // 中转地址：经由中转服务器出站。格式 user:pass@host:port 或 host:port，留空表示不启用
 // 用户名与密码不要包含特殊字符；一旦设置，就会忽略回退地址
 let 中转地址 = '';
