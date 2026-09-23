@@ -1,4 +1,4 @@
-// 国外热门 AI 平台名单
+// 国外热门 AI 平台名单（仅对 AI 域名启用 IPv6 策略传出）
 const AI_DOMAINS = [
   'openai.com',
   'chatgpt.com',
@@ -23,7 +23,7 @@ function isAiDomain(domain) {
   return AI_DOMAINS.some(k => lower.includes(k));
 }
 
-// DoH 查询 IPv6 (AAAA 记录)，强制走 IPv6 出站
+// 解析目标地址：如果是域名，查询 AAAA 记录转为 IPv6 格式传出
 async function resolveIPv6(domain) {
   if (!domain || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(domain) || domain.includes(':')) {
     return domain;
@@ -37,7 +37,9 @@ async function resolveIPv6(domain) {
     const data = await res.json();
     const records = data.Answer?.filter(a => a.type === 28); // 28 为 AAAA 记录
     if (records && records.length > 0) {
-      return records[Math.floor(Math.random() * records.length)].data;
+      const ipv6 = records[Math.floor(Math.random() * records.length)].data;
+      // 若返回纯 IPv6 地址，包裹为标准格式用于底层连接
+      return ipv6.startsWith('[') ? ipv6 : `[${ipv6}]`;
     }
   } catch (e) {}
   return domain;
@@ -151,7 +153,8 @@ async function socks5Connect(addressType, addressRemote, portRemote, cfg) {
   if (addressType === 1) DST = new Uint8Array([1, ...addressRemote.split(".").map(Number)]);
   else if (addressType === 2) DST = new Uint8Array([3, addressRemote.length, ...enc.encode(addressRemote)]);
   else if (addressType === 3) {
-    const bytes = addressRemote.slice(1, -1).split(':').flatMap(h => [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16)]);
+    const cleanIpv6 = addressRemote.replace(/^\[\vert{}\]$/g, '');
+    const bytes = cleanIpv6.split(':').flatMap(h => [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16)]);
     DST = new Uint8Array([4, ...bytes]);
   }
   await writer.write(new Uint8Array([5, 1, 0, ...DST, (portRemote >> 8) & 0xff, portRemote & 0xff]));
@@ -311,7 +314,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
   };
 
   const tryConnect = async (host, port, addressType) => {
-    // 1. 全局强制代理优先
+    // 1. 全局强制代理配置优先
     if (globalProxy) {
       if (globalProxy.type === 'socks5')
         return await socks5Connect(addressType, host, port, globalProxy.cfg);
@@ -319,18 +322,19 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
         return await httpConnect(addressType, host, port, globalProxy.cfg);
     } 
 
-    // 2. 目标为域名时（包含 AI 域名），通过 DoH 强制解析 AAAA 并走 IPv6 直连出站
+    // 2. 策略执行：若目标是域名且命中 AI 分流名单，解析 AAAA 强制按 IPv6 传出
     let targetHost = host;
-    if (addressType === 2) {
+    if (addressType === 2 && isAiDomain(host)) {
       targetHost = await resolveIPv6(host);
     }
 
+    // 3. 直连出站（普通流量保持原生直连，AI 流量按上面解析的 IPv6 传出）
     try {
       const socket = connect({ hostname: targetHost, port });
       if (socket.opened) await socket.opened;
       return socket;
     } catch (err) {
-      // 3. 直连失败后依次回退通用 SOCKS5 与 ProxyIP 备用代理
+      // 4. 直连异常时回退备用 SOCKS5 与 ProxyIP 代理
       if (!socks5 && !proxyIP) throw err;
 
       if (socks5) {
