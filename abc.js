@@ -1,456 +1,394 @@
-// 国外热门 AI 平台名单（仅对 AI 域名启用 IPv6 策略传出）
-const AI_DOMAINS = [
-  'openai.com',
-  'chatgpt.com',
-  'oaistatic.com',
-  'oaiusercontent.com',
-  'anthropic.com',
-  'claude.ai',
-  'gemini.google.com',
-  'generativelanguage.googleapis.com',
-  'ai.google.dev',
-  'x.ai',
-  'grok.com',
-  'copilot.microsoft.com',
-  'sydney.bing.com',
-  'perplexity.ai',
-  'poe.com'
-];
+/**
+ * =================================================================================
+ * All-in-One AI Gateway Worker with Analytics Engine Logging
+ * =================================================================================
+ *
+ * This version integrates with Cloudflare Analytics Engine to log key metrics
+ * for every API request, providing powerful, free observability.
+ *
+ * It requires an Analytics Engine binding named `LOGS`.
+ *
+ * =================================================================================
+ */
 
-function isAiDomain(domain) {
-  if (!domain || typeof domain !== 'string') return false;
-  const lower = domain.toLowerCase();
-  return AI_DOMAINS.some(k => lower.includes(k));
-}
+// --- CONFIGURATION ---
+// Using const for configuration objects with lowercase keys to avoid toLowerCase calls
+const ROUTE_MAP = {
+  "cerebras": "api.cerebras.ai",
+  "claude": "api.anthropic.com",
+  "gemini": "generativelanguage.googleapis.com",
+  "groq": "api.groq.com",
+  "openai": "api.openai.com",
+};
 
-// 解析目标地址：如果是域名，查询 AAAA 记录转为 IPv6 格式传出
-async function resolveIPv6(domain) {
-  if (!domain || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(domain) || domain.includes(':')) {
-    return domain;
-  }
-  try {
-    const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=AAAA`, {
-      headers: { 'accept': 'application/dns-json' },
-      cf: { cacheTtl: 300 }
-    });
-    if (!res.ok) return domain;
-    const data = await res.json();
-    const records = data.Answer?.filter(a => a.type === 28); // 28 为 AAAA 记录
-    if (records && records.length > 0) {
-      const ipv6 = records[Math.floor(Math.random() * records.length)].data;
-      // 若返回纯 IPv6 地址，包裹为标准格式用于底层连接
-      return ipv6.startsWith('[') ? ipv6 : `[${ipv6}]`;
-    }
-  } catch (e) {}
-  return domain;
-}
-// ========================================================
+// --- HELPER FUNCTIONS FOR API ROTATION ---
 
-const MAX_PENDING = 2 * 1024 * 1024, KEEPALIVE = 15000, STALL_TO = 8000, MAX_STALL = 12, MAX_RECONN = 24;
-const buildUUID = (a, i) => Array.from(a.slice(i, i + 16)).map(n => n.toString(16).padStart(2, '0')).join('').replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5');
-
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-
-    if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
-      return new Response('Hello World!', { status: 200 });
-    }
-
-    const { proxyIP, socks5, enableSocks, globalProxy } = parseProxyConfig(url.pathname);
-
-    const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
-    let earlyData = null;
-    if (earlyDataHeader) {
+/**
+ * Extracts API key from request based on service provider format
+ * @param {Request} request - The incoming request
+ * @param {string} service - Service provider name
+ * @returns {string|null} Extracted API key
+ */
+function extractApiKey(request, service) {
+  // Avoid unnecessary toLowerCase calls since service name is already processed in fetch
+  switch (service) {
+    case 'gemini':
+      // Gemini uses x-goog-api-key header or 'key' query parameter
+      const apiKeyFromHeader = request.headers.get('x-goog-api-key');
+      if (apiKeyFromHeader) {
+        return apiKeyFromHeader;
+      }
+      
+      // Check if URL contains 'key' query parameter
       try {
-        const base64Str = earlyDataHeader.replace(/-/g, '+').replace(/_/g, '/');
-        const binaryStr = atob(base64Str);
-        earlyData = Uint8Array.from(binaryStr, c => c.charCodeAt(0));
-      } catch (e) {}
-    }
-
-    const { 0: client, 1: server } = new WebSocketPair();
-    server.accept();
-    
-    handle(server, proxyIP, socks5, enableSocks, globalProxy, earlyData);
-    
-    const headers = new Headers();
-    if (earlyDataHeader) {
-      headers.set('Sec-WebSocket-Protocol', earlyDataHeader);
-    }
-
-    return new Response(null, { status: 101, webSocket: client, headers });
-  }
-};
-
-const extractAddr = b => {
-  const o1 = 18 + b[17] + 1, p = (b[o1] << 8) | b[o1 + 1], t = b[o1 + 2]; let o2 = o1 + 3, h, l;
-  switch (t) {
-    case 1: l = 4; h = b.slice(o2, o2 + l).join('.'); break;
-    case 2: l = b[o2++]; h = new TextDecoder().decode(b.slice(o2, o2 + l)); break;
-    case 3: l = 16; h = `[${Array.from({ length: 8 }, (_, i) => ((b[o2 + i * 2] << 8) | b[o2 + i * 2 + 1]).toString(16)).join(':')}]`; break;
-    default: throw new Error('Invalid address type.');
-  } return { host: h, port: p, payload: b.slice(o2 + l), addressType: t };
-};
-
-const parseAddressPort = (seg) => {
-  if (seg.startsWith("[")) {
-    const m = seg.match(/^\[(.+?)\]:(\d+)$/);
-    if (m) return [m[1], Number(m[2])];
-    return [seg.slice(1, -1), 443];
-  }
-  const [addr, port = 443] = seg.split(":");
-  return [addr, Number(port)];
-};
-
-const socks5AddressParser = (raw) => {
-  let username, password, hostname, port;
-
-  const cleanedRaw = raw.replace(/^(socks5?|https?):\/\//i, '');
-
-  if (cleanedRaw.includes('://')) {
-    const u = new URL(raw);
-    hostname = u.hostname;
-    port = u.port || (u.protocol === 'http:' ? 80 : 1080);
-    const auth = u.username || u.password ? `${u.username}:${u.password}` : u.username;
-    if (auth && auth.includes(':')) [username, password] = auth.split(':');
-  } else {
-    let authPart = '', hostPart = cleanedRaw;
-    const at = cleanedRaw.lastIndexOf('@');
-    if (at !== -1) { authPart = cleanedRaw.substring(0, at); hostPart = cleanedRaw.substring(at + 1); }
-
-    if (authPart && !authPart.includes(':')) {
-      try { 
-        const dec = atob(authPart.replace(/%3D/g, '=').padEnd(authPart.length + (4 - authPart.length % 4) % 4, '=')); 
-        const p = dec.split(':'); if (p.length === 2) [username, password] = p; 
-      } catch {}
-    }
-    if (!username && authPart && authPart.includes(':')) [username, password] = authPart.split(':');
-
-    const [h, p] = parseAddressPort(hostPart);
-    hostname = h; port = p || 1080;
-  }
-
-  if (!hostname || isNaN(port)) throw new Error("Invalid proxy config");
-  return { username, password, hostname, port };
-};
-
-async function socks5Connect(addressType, addressRemote, portRemote, cfg) {
-  const { username, password, hostname, port } = cfg;
-  const socket = connect({ hostname, port });
-  const writer = socket.writable.getWriter();
-  await writer.write(new Uint8Array([5, username ? 2 : 1, 0, username ? 2 : 0]));
-  const reader = socket.readable.getReader();
-  const enc = new TextEncoder();
-  let resp = (await reader.read()).value;
-  if (resp[1] === 2) {
-    const auth = new Uint8Array([1, username.length, ...enc.encode(username), password.length, ...enc.encode(password)]);
-    await writer.write(auth);
-    resp = (await reader.read()).value;
-    if (resp[1] !== 0) throw new Error("SOCKS5 auth failed");
-  }
-  let DST;
-  if (addressType === 1) DST = new Uint8Array([1, ...addressRemote.split(".").map(Number)]);
-  else if (addressType === 2) DST = new Uint8Array([3, addressRemote.length, ...enc.encode(addressRemote)]);
-  else if (addressType === 3) {
-    const cleanIpv6 = addressRemote.replace(/^\[\vert{}\]$/g, '');
-    const bytes = cleanIpv6.split(':').flatMap(h => [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16)]);
-    DST = new Uint8Array([4, ...bytes]);
-  }
-  await writer.write(new Uint8Array([5, 1, 0, ...DST, (portRemote >> 8) & 0xff, portRemote & 0xff]));
-  resp = (await reader.read()).value;
-  if (resp[1] !== 0) throw new Error("SOCKS5 connect failed");
-  writer.releaseLock(); reader.releaseLock();
-  return socket;
-}
-
-async function httpConnect(addressType, addressRemote, portRemote, cfg) {
-  const { username, password, hostname, port } = cfg;
-  const sock = connect({ hostname, port });
-
-  let req = `CONNECT ${addressRemote}:${portRemote} HTTP/1.1\r\n` +
-            `Host: ${addressRemote}:${portRemote}\r\n`;
-
-  if (username && password) {
-    req += `Proxy-Authorization: Basic ${btoa(`${username}:${password}`)}\r\n`;
-  }
-
-  req += `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36\r\n` +
-         `Connection: keep-alive\r\n\r\n`;
-
-  const writer = sock.writable.getWriter();
-  await writer.write(new TextEncoder().encode(req));
-  writer.releaseLock();
-
-  const reader = sock.readable.getReader();
-  let buf = new Uint8Array(0);
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) throw new Error("HTTP proxy closed unexpectedly");
-
-    const tmp = new Uint8Array(buf.length + value.length);
-    tmp.set(buf);
-    tmp.set(value, buf.length);
-    buf = tmp;
-    if (buf.length > 65536) throw new Error("HTTP proxy response too large"); 
-    const txt = new TextDecoder().decode(buf);
-    if (txt.includes("\r\n\r\n")) {
-      if (/^HTTP\/1\.[01] 2/i.test(txt.split("\r\n")[0])) {
-        reader.releaseLock();
-        return sock;
+        const url = new URL(request.url);
+        const apiKeyFromUrl = url.searchParams.get('key');
+        if (apiKeyFromUrl) {
+          return apiKeyFromUrl;
+        }
+      } catch (e) {
+        // Ignore URL parsing errors
       }
-      throw new Error(`HTTP proxy refused: ${txt.split("\r\n")[0]}`);
-    }
+      
+      return null;
+    case 'claude':
+      // Claude uses x-api-key header
+      return request.headers.get('x-api-key') || null;
+    default:
+      // Other services use Authorization header with Bearer format
+      const authHeader = request.headers.get('Authorization');
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        return authHeader.substring(7);
+      }
+      return null;
   }
 }
 
-function parseProxyConfig(path) {
-  let proxyIP = null, socks5 = null, enableSocks = null, globalProxy = null;
-
-  const globalMatch = path.match(/^\/SOCKS5(?:[:=]|\/\/)?([^/#?]+)/i);
-  if (globalMatch) {
-    const cfg = socks5AddressParser(globalMatch[1]);
-    globalProxy = { type: 'socks5', cfg };
-    return { proxyIP, socks5, enableSocks, globalProxy };
-  } else if (SOCKS5_GLOBAL) {
-    const builtInGlobalMatch = SOCKS5_GLOBAL.match(/(socks5?|https?):\/\/(.+)/i);
-    if (builtInGlobalMatch) {
-      const cfg = socks5AddressParser(builtInGlobalMatch[2]);
-      globalProxy = { type: 'socks5', cfg };
-      return { proxyIP, socks5, enableSocks, globalProxy };
-    }
+/**
+ * Gets next API key index to use from D1 database
+ * @param {object} db - D1 database instance
+ * @param {string} service - Service provider name
+ * @param {number} keysCount - Number of available keys
+ * @returns {Promise<number>} Next key index to use
+ */
+async function getNextKeyIndex(db, service, keysCount) {
+  if (!db) {
+    throw new Error('D1数据库未配置');
   }
-
-  const proxyIpMatch = path.match(/^\/ProxyIP[=\/]([^?#]+)/i);
-  if (proxyIpMatch) {
-    const seg = proxyIpMatch[1];
-    if (seg.includes('@') || seg.includes('socks')) {
-      socks5 = socks5AddressParser(seg);
-      enableSocks = 'socks5';
-    } else {
-      const [addr, port = 443] = parseAddressPort(seg);
-      proxyIP = { address: addr.includes('[') ? addr.slice(1, -1) : addr, port: +port };
-    }
-  } else {
-    if (SOCKS5) {
-      socks5 = socks5AddressParser(SOCKS5);
-      enableSocks = 'socks5';
-    }
-    if (PROXYIP) {
-      const [addr, port = 443] = parseAddressPort(PROXYIP);
-      proxyIP = { address: addr.includes('[') ? addr.slice(1, -1) : addr, port: +port };
-    }
+  
+  try {
+    // Table name constant for easier modification
+    const ROTATION_STATE_TABLE = 'rotation_state'; // Users can modify based on actual database table name
+    
+    // Direct operation using D1 standard API, leveraging SQL ON CONFLICT mechanism to ensure atomicity
+    const statement = db.prepare(`
+      INSERT INTO ${ROTATION_STATE_TABLE} (service_name, next_index, last_updated)
+      VALUES (?1, 1, CURRENT_TIMESTAMP)
+      ON CONFLICT(service_name) DO UPDATE
+      SET 
+        next_index = (next_index + 1) % ?2,
+        last_updated = CURRENT_TIMESTAMP
+      RETURNING next_index;
+    `).bind(service, keysCount);
+    
+    const { results } = await statement.all();
+    
+    // Ensure index is within valid range
+    const nextIndex = results[0]?.next_index || 1;
+    return (nextIndex - 1 + keysCount) % keysCount;
+  } catch (e) {
+    throw new Error(`D1数据库错误: ${e.message}`);
   }
-
-  return { proxyIP, socks5, enableSocks, globalProxy };
 }
 
-class Pool {
-  constructor() { this.buf = new ArrayBuffer(16384); this.ptr = 0; this.pool = []; this.max = 8; this.large = false; }
-  alloc = s => {
-    if (s <= 4096 && s <= 16384 - this.ptr) { const v = new Uint8Array(this.buf, this.ptr, s); this.ptr += s; return v; } const r = this.pool.pop();
-    if (r && r.byteLength >= s) return new Uint8Array(r.buffer, 0, s); return new Uint8Array(s);
-  };
-  free = b => {
-    if (b.buffer === this.buf) { this.ptr = Math.max(0, this.ptr - b.length); return; }
-    if (this.pool.length < this.max && b.byteLength >= 1024) this.pool.push(b);
-  }; enableLarge = () => { this.large = true; }; reset = () => { this.ptr = 0; this.pool.length = 0; this.large = false; };
-}
+// --- WORKER LOGIC (ES Modules format) ---
+export default {
+  /**
+   * The main entry point for the Worker.
+   * @param {Request} request The incoming request.
+   * @param {object} env Environment variables, including the LOGS binding.
+   * @param {object} ctx Execution context, used for ctx.waitUntil().
+   * @returns {Promise<Response>}
+   */
+  async fetch(request, env, ctx) {
+    const startTime = Date.now();
+    let response;
+    let requestData = {};
 
-const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
-  const pool = new Pool(); let sock, w, r, info, first = true, rxBytes = 0, stalls = 0, reconns = 0;
-  let lastAct = Date.now(), conn = false, reading = false; const tmrs = {}, pend = [];
-  let pendBytes = 0, score = 1.0, lastChk = Date.now(), lastRx = 0, succ = 0, fail = 0;
-  let stats = { tot: 0, cnt: 0, big: 0, win: 0, ts: Date.now() }; let mode = 'adaptive', avgSz = 0, tputs = [];
-
-  const updateMode = s => {
-    stats.tot += s; stats.cnt++; if (s > 8192) stats.big++; avgSz = avgSz * 0.9 + s * 0.1; const now = Date.now();
-    if (now - stats.ts > 1000) {
-      const rate = stats.win; tputs.push(rate); if (tputs.length > 5) tputs.shift(); stats.win = s; stats.ts = now;
-      const avg = tputs.reduce((a, b) => a + b, 0) / tputs.length;
-      if (stats.cnt >= 20) {
-        if (avg < 8388608 || avgSz < 4096) { if (mode !== 'buffered') { mode = 'buffered'; pool.enableLarge(); } }
-        else if (avg > 16777216 && avgSz > 12288) { if (mode !== 'direct') mode = 'direct'; }
-        else { if (mode !== 'adaptive') mode = 'adaptive'; }
-      }} else { stats.win += s; }
-  };
-
-  const readLoop = async () => {
-    if (reading) return; reading = true; let batch = [], bSz = 0, bTmr = null;
-    const flush = () => {
-      if (!bSz) return; const m = new Uint8Array(bSz); let p = 0;
-      for (const c of batch) { m.set(c, p); p += c.length; }
-      if (ws.readyState === 1) ws.send(m);
-      batch = []; bSz = 0; if (bTmr) { clearTimeout(bTmr); bTmr = null; }
-    };
     try {
-      while (true) {
-        if (pendBytes > MAX_PENDING) { await new Promise(res => setTimeout(res, 100)); continue; }
-        const { done, value: v } = await r.read();
-        if (v?.length) {
-          rxBytes += v.length; lastAct = Date.now(); stalls = 0; updateMode(v.length); const now = Date.now();
-          if (now - lastChk > 5000) {
-            const el = now - lastChk, by = rxBytes - lastRx, tp = by / el;
-            if (tp > 500) score = Math.min(1.0, score + 0.05);
-            else if (tp < 50) score = Math.max(0.1, score - 0.05);
-            lastChk = now; lastRx = rxBytes;
+      // Validate URL format
+      const url = new URL(request.url);
+      
+      // Parse path segments
+      const pathSegments = url.pathname.split('/').filter(Boolean);
+      
+      // Check if there's a service provider segment and it's configured in ROUTE_MAP
+      if (pathSegments.length < 1 || !ROUTE_MAP[pathSegments[0]]) {
+        // Invalid URL format, return error code 325 without logging
+        return new Response('url格式错误', { status: 325 });
+      }
+
+      // Extract service name (already validated to be lowercase)
+      const service = pathSegments[0];
+      
+      // Delay cloning request and parsing data until necessary
+      requestData = { service, model: 'unknown' };
+      
+      // Attempt to extract model information without blocking main logic
+      try {
+        // Only attempt to extract model info if LOGS is configured and it's a POST request
+        if (env.LOGS && request.method === 'POST') {
+          if (service === 'gemini') {
+            // For Gemini POST requests, extract model from URL path
+            // Expected format: https://{custom-url}/gemini/v1beta/models/{model-name}:{function-name}
+            if (pathSegments.length >= 4 && pathSegments[2] === 'models') {
+              // Split by colon to get model name without function suffix
+              requestData.model = pathSegments[3].split(':')[0] || 'unknown';
+            }
+          } else {
+            // For other services' POST requests, extract model from request body
+            const clonedRequest = request.clone();
+            const body = await clonedRequest.json().catch(() => ({}));
+            requestData.model = body.model || 'unknown';
           }
-          if (mode === 'buffered') {
-            if (v.length < 16384) {
-              batch.push(v); bSz += v.length;
-              if (bSz >= 65536) flush();
-              else if (!bTmr) bTmr = setTimeout(flush, avgSz > 8192 ? 8 : 25);
-            } else { flush(); if (ws.readyState === 1) ws.send(v); }
-          } else if (mode === 'direct') { flush(); if (ws.readyState === 1) ws.send(v);
-          } else if (mode === 'adaptive') {
-            if (v.length < 8192) {
-              batch.push(v); bSz += v.length;
-              if (bSz >= 49152) flush();
-              else if (!bTmr) bTmr = setTimeout(flush, 12);
-            } else { flush(); if (ws.readyState === 1) ws.send(v); } }
-        } if (done) { flush(); reading = false; reconn(); break; }
-      }} catch (e) { flush(); if (bTmr) clearTimeout(bTmr); reading = false; fail++; reconn(); }
-  };
+        }
+      } catch (e) {
+        // Ignore any data extraction errors and continue processing
+      }
 
-  const tryConnect = async (host, port, addressType) => {
-    // 1. 全局强制代理配置优先
-    if (globalProxy) {
-      if (globalProxy.type === 'socks5')
-        return await socks5Connect(addressType, host, port, globalProxy.cfg);
-      if (globalProxy.type === 'http')
-        return await httpConnect(addressType, host, port, globalProxy.cfg);
-    } 
+      // Handle API rotation logic and pass parsed URL to avoid duplicate creation
+      response = await handleRequestWithRotation(request, service, env, url);
+      
+      // Only clone response and log when LOGS binding is available
+      if (env.LOGS) {
+        const clonedResponse = response.clone();
+        ctx.waitUntil(logRequest(env, requestData, clonedResponse, startTime));
+      }
+      
+      return response;
 
-    // 2. 策略执行：若目标是域名且命中 AI 分流名单，解析 AAAA 强制按 IPv6 传出
-    let targetHost = host;
-    if (addressType === 2 && isAiDomain(host)) {
-      targetHost = await resolveIPv6(host);
-    }
-
-    // 3. 直连出站（普通流量保持原生直连，AI 流量按上面解析的 IPv6 传出）
-    try {
-      const socket = connect({ hostname: targetHost, port });
-      if (socket.opened) await socket.opened;
-      return socket;
     } catch (err) {
-      // 4. 直连异常时回退备用 SOCKS5 与 ProxyIP 代理
-      if (!socks5 && !proxyIP) throw err;
-
-      if (socks5) {
-        try {
-          const localSocket = enableSocks === 'http'
-            ? await httpConnect(addressType, host, port, socks5)
-            : await socks5Connect(addressType, host, port, socks5);
-          if (localSocket.opened) await localSocket.opened;
-          return localSocket;
-        } catch {}
+      // For URL format errors, we already handled them separately earlier, here handle other errors
+      response = new Response(err.message || 'An unexpected error occurred.', { status: 500 });
+      
+      // Only log error when LOGS binding is available
+      if (env.LOGS) {
+        ctx.waitUntil(logRequest(env, requestData, response, startTime, err));
       }
 
-      if (proxyIP) {
-        try {
-          const proxySocket = connect({ hostname: proxyIP.address, port: proxyIP.port });
-          if (proxySocket.opened) await proxySocket.opened;
-          return proxySocket;
-        } catch {}
-      }
-
-      throw err; 
-    }
-  };
-
-  const processFirstChunk = (b) => {
-    if (buildUUID(b, 1) !== UUID) throw new Error('Auth failed');
-    const { host, port, payload, addressType } = extractAddr(b);
-    info = { host, port, addressType };
-    ws.send(new Uint8Array([b[0], 0]));
-    conn = true;
-    if (payload.length) {
-      const buf = pool.alloc(payload.length); buf.set(payload);
-      pend.push(buf); pendBytes += buf.length;
-    }
-    startTmrs();
-    establish();
-  };
-
-  const establish = async () => {
-    try {
-      sock = await tryConnect(info.host, info.port, info.addressType);
-      if (sock.opened) await sock.opened;
-      w = sock.writable.getWriter();
-      r = sock.readable.getReader();
-
-      const bt = pend.splice(0, 10);
-      for (const b of bt) { await w.write(b); pendBytes -= b.length; pool.free(b); }
-      conn = false; reconns = 0; score = Math.min(1.0, score + 0.15); succ++; lastAct = Date.now(); readLoop();
-    } catch (e) { conn = false; fail++; score = Math.max(0.1, score - 0.2); reconn(); }
-  };
-
-  const reconn = async () => {
-    if (!info || ws.readyState !== 1) { cleanup(); ws.close(1011, 'Invalid.'); return; }
-    if (reconns >= MAX_RECONN) { cleanup(); ws.close(1011, 'Max reconnect.'); return; }
-    if (score < 0.3 && reconns > 5 && Math.random() > 0.6) { cleanup(); ws.close(1011, 'Poor network.'); return; }
-    if (conn) return; reconns++; let d = Math.min(50 * Math.pow(1.5, reconns - 1), 3000);
-    d *= (1.5 - score * 0.5); d += (Math.random() - 0.5) * d * 0.2; d = Math.max(50, Math.floor(d));
-    try {
-      cleanSock();
-      if (pendBytes > MAX_PENDING * 2) {
-        while (pendBytes > MAX_PENDING && pend.length > 5) { const drop = pend.shift(); pendBytes -= drop.length; pool.free(drop); }
-      }
-      await new Promise(res => setTimeout(res, d)); conn = true;
-      sock = await tryConnect(info.host, info.port, info.addressType); 
-      w = sock.writable.getWriter(); r = sock.readable.getReader(); const bt = pend.splice(0, 10);
-      for (const b of bt) { await w.write(b); pendBytes -= b.length; pool.free(b); }
-      conn = false; reconns = 0; score = Math.min(1.0, score + 0.15); succ++; stalls = 0; lastAct = Date.now(); readLoop();
-    } catch (e) { conn = false; fail++; score = Math.max(0.1, score - 0.2);
-      if (reconns < MAX_RECONN && ws.readyState === 1) setTimeout(reconn, 500);
-      else { cleanup(); ws.close(1011, 'Exhausted.'); }}
-  };
-
-  const startTmrs = () => {
-    tmrs.ka = setInterval(async () => {
-      if (!conn && w && Date.now() - lastAct > KEEPALIVE) { try { await w.write(new Uint8Array(0)); lastAct = Date.now(); } catch (e) { reconn(); }}
-    }, KEEPALIVE / 3);
-    tmrs.hc = setInterval(() => {
-      if (!conn && stats.tot > 0 && Date.now() - lastAct > STALL_TO) { stalls++;
-        if (stalls >= MAX_STALL) {
-          if (reconns < MAX_RECONN) { stalls = 0; reconn(); }
-          else { cleanup(); ws.close(1011, 'Stall.'); }
-        }}}, STALL_TO / 2);
-  };
-
-  const cleanSock = () => { reading = false; try { w?.releaseLock(); r?.releaseLock(); sock?.close(); } catch {} };
-  const cleanup = (code, reason) => {
-    Object.values(tmrs).forEach(clearInterval); cleanSock();
-    while (pend.length) pool.free(pend.shift());
-    pendBytes = 0; stats = { tot: 0, cnt: 0, big: 0, win: 0, ts: Date.now() };
-    mode = 'adaptive'; avgSz = 0; tputs = []; pool.reset();
-    if (ws.readyState === 1) ws.close(code, reason);
-  };
-
-  if (earlyData) {
-    first = false;
-    try {
-      processFirstChunk(earlyData);
-    } catch (err) {
-      cleanup();
-      ws.close(1006, 'Error.');
-      return;
+      return response;
     }
   }
-
-  ws.addEventListener('message', async e => {
-    try {
-      if (first) {
-        first = false;
-        processFirstChunk(new Uint8Array(e.data));
-      } else { 
-        lastAct = Date.now();
-        if (conn || !w) { const buf = pool.alloc(e.data.byteLength); buf.set(new Uint8Array(e.data)); pend.push(buf); pendBytes += buf.length; }
-        else { await w.write(e.data); }
-      }
-    } catch (err) { cleanup(); ws.close(1006, 'Error.'); }
-  });
-  ws.addEventListener('close', cleanup);
-  ws.addEventListener('error', cleanup);
 };
+
+// --- CORE HANDLER ---
+/**
+ * Request handler with API key rotation functionality
+ * @param {Request} request - The incoming request
+ * @param {string} service - Service provider name
+ * @param {object} env - Environment variables containing LOGS and DB bindings
+ * @param {URL} url - Parsed URL object to avoid duplicate creation
+ * @returns {Promise<Response>} Processed response
+ */
+async function handleRequestWithRotation(request, service, env, url) {
+  if (request.method === 'OPTIONS') {
+    return handleOptions();
+  }
+
+  // Service provider already validated in fetch function, directly get target host
+  const targetHost = ROUTE_MAP[service];
+
+  // Reuse the provided URL object to avoid duplicate creation
+  url.hostname = targetHost;
+  url.pathname = url.pathname.substring(service.length + 1); // Removes /service prefix
+
+  // Get MASTER_KEY configuration
+  const masterKey = env.MASTER_KEY;
+  
+  // Only extract API key and handle rotation logic when rotation mode is enabled
+  if (masterKey) {
+    const requestApiKey = extractApiKey(request, service);
+    
+    if (requestApiKey === masterKey) {
+      // Enable rotation mode
+      const serviceKeysEnv = env[`${service.toUpperCase()}_KEYS`];
+      
+      if (!serviceKeysEnv) {
+        // Rotation API keys not configured
+        return new Response('未配置轮询api key', { status: 326 });
+      }
+      
+      try {
+        // Parse service provider's key list
+        const serviceKeys = JSON.parse(serviceKeysEnv);
+        
+        if (!Array.isArray(serviceKeys) || serviceKeys.length === 0) {
+          return new Response('未配置轮询api key', { status: 326 });
+        }
+        
+        // Get rotation limit from environment variables or use default
+        const rotationLimit = env.ROTATION_LIMIT ? parseInt(env.ROTATION_LIMIT) : 5;
+        // Optimized rotation retry logic
+        const maxRetries = Math.min(rotationLimit, serviceKeys.length); // Maximum retries is the smaller of rotationLimit or the number of keys
+        let currentIndex = await getNextKeyIndex(env.DB, service, serviceKeys.length);
+        let lastResponse = null;
+        
+        for (let retryCount = 0; retryCount < maxRetries; retryCount++) {
+          const selectedKey = serviceKeys[currentIndex];
+          
+          // Set appropriate request headers based on service provider format
+          const headers = new Headers(request.headers);
+          
+          // Create a copy of the URL for modification
+          const modifiedUrl = new URL(url.toString());
+          
+          // Avoid unnecessary toLowerCase calls
+          switch (service) {
+            case 'gemini':
+              // In rotation mode, always use header for API key regardless of original request format
+              headers.set('x-goog-api-key', selectedKey);
+              // Remove key parameter from URL if present to avoid conflicts
+              if (modifiedUrl.searchParams.has('key')) {
+                modifiedUrl.searchParams.delete('key');
+              }
+              break;
+            case 'claude':
+              headers.set('x-api-key', selectedKey);
+              break;
+            default:
+              headers.set('Authorization', `Bearer ${selectedKey}`);
+              break;
+          }
+          
+          // Create proxy request with new headers and modified URL
+          const proxyRequest = new Request(modifiedUrl.toString(), {
+            method: request.method,
+            headers: headers,
+            body: request.body,
+            redirect: 'follow',
+          });
+          
+          try {
+            lastResponse = await fetch(proxyRequest);
+            
+            // Check if successful or not a 429 error
+            if (lastResponse.status !== 429) {
+              // Request successful or non-429 error, return response
+              const newResponse = new Response(lastResponse.body, lastResponse);
+              applyCorsHeaders(newResponse);
+              return newResponse;
+            }
+            
+            // 429 rate limit error encountered, proceeding to try next available API key
+            
+          } catch (fetchError) {
+            // Request exception, continue with next key
+          }
+          
+          // Move to next key index
+          currentIndex = (currentIndex + 1) % serviceKeys.length;
+        }
+        
+        // If all keys have been tried or max retries reached
+        if (lastResponse && lastResponse.status === 429) {
+          // All keys returned 429, return the last response
+          const newResponse = new Response(lastResponse.body, lastResponse);
+          applyCorsHeaders(newResponse);
+          return newResponse;
+        }
+        
+        // No valid response, return generic error
+        return new Response('所有API密钥均已超出配额，请稍后再试', { status: 429 });
+        
+      } catch (e) {
+        return new Response(`轮询配置错误: ${e.message}`, { status: 500 });
+      }
+    }
+  }
+  
+  // Non-rotation mode, directly create and send request to avoid extra comparison operations
+  const proxyRequest = new Request(url.toString(), {
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
+    redirect: 'follow',
+  });
+  
+  const upstreamResponse = await fetch(proxyRequest);
+  const newResponse = new Response(upstreamResponse.body, upstreamResponse);
+  applyCorsHeaders(newResponse);
+  return newResponse;
+}
+
+/**
+ * Asynchronously logs data to the Analytics Engine.
+ * @param {object} env - The environment object containing bindings.
+ * @param {object} requestData - Data extracted from the request {service, model}.
+ * @param {Response} response - The final response object.
+ * @param {number} startTime - The timestamp when the request started.
+ * @param {Error} [error] - An optional error object if the request failed.
+ */
+async function logRequest(env, requestData, response, startTime, error = null) {
+  // Check for LOGS binding to avoid unnecessary computations
+  if (!env.LOGS) {
+    return;
+  }
+
+  const latencyMs = Date.now() - startTime;
+  const service = requestData.service || "unknown";
+  const model = requestData.model || "unknown";
+
+  try {
+    // Prepare log data point, add error information only when there's an error
+    const dataPoint = {
+      // Configure data point as required
+      indexes: [
+        service
+      ],
+      // Add error information only when there's an error
+      blobs: error ? [
+        service,
+        model,
+        error.message
+      ] : [
+        service,
+        model,
+        null
+      ],
+      doubles: [
+        response.status,
+        latencyMs
+      ],
+    };
+
+    // Write the data point to the Analytics Engine
+    env.LOGS.writeDataPoint(dataPoint);
+
+  } catch (logError) {
+    // Ignore logging errors to avoid affecting main process
+  }
+}
+
+
+// --- HELPER FUNCTIONS ---
+function applyCorsHeaders(response) {
+  // Avoid duplicate CORS header settings
+  if (!response.headers.has('Access-Control-Allow-Origin')) {
+    response.headers.set('Access-Control-Allow-Origin', '*');
+    response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+    response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key, x-goog-api-key, anthropic-version, openai-organization');
+  }
+}
+
+function handleOptions() {
+  // Directly create response with CORS headers to avoid extra function calls
+  const response = new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-api-key, x-goog-api-key, anthropic-version, openai-organization'
+    }
+  });
+  return response;
+}
