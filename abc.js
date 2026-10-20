@@ -445,6 +445,12 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 		if (addressType === 2 && isAiDomain(address)) {
 			targetHost = await resolveIPv6(address);
 		}
+
+		// 恢复旧版简单粗暴的 proxyIP 逻辑：只要配置了普通的 IP/域名，强制接管所有直连流量
+		if (runtimeProxy && !runtimeProxy.includes('://')) {
+			targetHost = runtimeProxy;
+		}
+
 		const tcpSocket = connect({ hostname: targetHost, port: port });
 		remoteSocketWapper.value = tcpSocket;
 		log(`Direct connected to ${targetHost}:${port}`);
