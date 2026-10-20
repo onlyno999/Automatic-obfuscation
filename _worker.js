@@ -1,6 +1,6 @@
 import { connect } from 'cloudflare:sockets';
 
-// 0. 据源
+// 0. 数据源
 const OPTIMAL_SOURCES = [
   "https://bestcf.pages.dev/wetest/ipv4.txt",
   "https://raw.githubusercontent.com/Senflare/Senflare-IP/refs/heads/main/Senflare-Pro.txt",
