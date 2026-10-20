@@ -4,7 +4,7 @@ import { connect } from 'cloudflare:sockets';
 const OPTIMAL_SOURCES = [
   "https://bestcf.pages.dev/wetest/ipv4.txt",
   "https://raw.githubusercontent.com/Senflare/Senflare-IP/refs/heads/main/Senflare-Pro.txt",
-  "https://bestcf.pages.dev/lzj/all.txt"
+  "https://bestcf.pages.dev/uouin/all.txt"
 ];
 
 // ==========================================================
