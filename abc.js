@@ -6,12 +6,12 @@ import { connect } from 'cloudflare:sockets';
 
 // How to generate your own UUID:
 // [Windows] Press "Win + R", input cmd and run:  Powershell -NoExit -Command "[guid]::NewGuid()"
-let userID = '2541f8d4-d157-46af-9169-0025bf435fbc';
+let userID = 'd342d11e-d424-4583-b36e-524ab1f0afa4';
 
 let proxyIP = 'wok.woxxxxxx.nyc.mn'; // 确保这里有默认值或者通过环境变量设置。
+// --- 原有变量 ---
 let proxyPort = 443; // 默认端口为 443
 
-// --- 新增：优选地址配置 ---
 let 优选地址 = 'https://bestcf.pages.dev/wetest/ipv4.txt,https://raw.githubusercontent.com/Senflare/Senflare-IP/refs/heads/main/Senflare-Pro.txt';
 
 // --- 新增：伪装页面相关的变量和函数 ---
@@ -124,9 +124,8 @@ export default {
 								headers: { "Content-Type": "text/plain;charset=utf-8" }
 							});
 						} else {
-                            // 此处改为 await，等待优选地址拉取完成
 							const dynamicProtocolConfig = await getDynamicProtocolConfig(userID, request.headers.get('Host'));
-							return new Response(dynamicProtocolConfig, {
+							return new Response(`${dynamicProtocolConfig}`, {
 								status: 200,
 								headers: { "Content-Type": "text/plain;charset=utf-8" }
 							});
@@ -170,11 +169,13 @@ export default {
 
 /**
  * 融合自知识库：高级代理链解析器 (支持 socks5://, socks://, http://, https://, ip:port)
+ * @param {string} serverStr 
  */
 function parseProxyAddress(serverStr) {
     if (!serverStr) return null;
     serverStr = serverStr.trim();
     
+    // 解析 SOCKS5
     if (serverStr.startsWith('socks://') || serverStr.startsWith('socks5://')) {
         const urlStr = serverStr.replace(/^socks:\/\//, 'socks5://');
         try {
@@ -189,6 +190,7 @@ function parseProxyAddress(serverStr) {
         } catch (e) { return null; }
     }
     
+    // 解析 HTTP
     if (serverStr.startsWith('http://') || serverStr.startsWith('https://')) {
         try {
             const url = new URL(serverStr);
@@ -202,6 +204,7 @@ function parseProxyAddress(serverStr) {
         } catch (e) { return null; }
     }
     
+    // 处理 IPv6 [host]:port 格式
     if (serverStr.startsWith('[')) {
         const closeBracket = serverStr.indexOf(']');
         if (closeBracket > 0) {
@@ -217,6 +220,7 @@ function parseProxyAddress(serverStr) {
         }
     }
 
+    // 普通 ip:port 或 域名:port 格式
     const lastColonIndex = serverStr.lastIndexOf(':');
     if (lastColonIndex > 0) {
         const host = serverStr.substring(0, lastColonIndex);
@@ -336,6 +340,9 @@ async function connectToHttp(proxyConfig, targetHost, targetPort, initialData) {
  * 接收经过高级解析整合后的 runtimeProxy 配置字符串
  */
 async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
+
+	/** @type {import("@cloudflare/workers-types").WebSocket[]} */
+	// @ts-ignore
 	const webSocketPair = new WebSocketPair();
 	const [client, webSocket] = Object.values(webSocketPair);
 
@@ -350,7 +357,10 @@ async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
 
 	const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
 
-	let remoteSocketWapper = { value: null };
+	/** @type {{ value: import("@cloudflare/workers-types").Socket | null}}*/
+	let remoteSocketWapper = {
+		value: null,
+	};
 	let isDns = false;
 
 	readableWebSocketStream.pipeTo(new WritableStream({
@@ -398,6 +408,7 @@ async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
 				return handleDNSQuery(rawClientData, webSocket, dynamicProtocolResponseHeader, log);
 			}
 			
+			// 处理 TCP 出站连接，传递提取到的高级代理字符串
 			await handleTCPOutBound(
 				remoteSocketWapper, 
 				addressType, 
@@ -418,6 +429,7 @@ async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
 
 	return new Response(null, {
 		status: 101,
+		// @ts-ignore
 		webSocket: client,
 	});
 }
@@ -427,6 +439,7 @@ async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
  */
 async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, dynamicProtocolResponseHeader, log, runtimeProxy) {
 	
+	// 直连连接器（支持 AI 域名通过 DoH AAAA 强制解析并直连 IPv6）
 	async function connectDirect(address, port, data) {
 		let targetHost = address;
 		if (addressType === 2 && isAiDomain(address)) {
@@ -441,6 +454,7 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 		return tcpSocket;
 	}
 
+	// 代理服务器链式连接器
 	async function connectViaProxy(proxyConfig, data) {
 		let tcpSocket;
 		if (proxyConfig.type === 'socks5') {
@@ -455,9 +469,13 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 		return tcpSocket;
 	}
 
+	// 解析出当前运行时应当使用的出站规则
 	const parsedProxy = parseProxyAddress(runtimeProxy);
+	
+	// 判断是否强制使用全局中转代理（配置为 socks5:// 或 http:// 协议头时）
 	const isForceProxy = parsedProxy && (parsedProxy.type === 'socks5' || parsedProxy.type === 'http');
 
+	// 触发重试/回退的安全边界机制
 	async function retryFallback() {
 		try {
 			if (isForceProxy) {
@@ -484,6 +502,7 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 		remoteSocketToWS(socket, webSocket, dynamicProtocolResponseHeader, null, log);
 	}
 
+	// 建立首发数据流
 	try {
 		if (isForceProxy) {
 			let tcpSocket = await connectViaProxy(parsedProxy, rawClientData);
@@ -498,6 +517,11 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 	}
 }
 
+/**
+ * * @param {import("@cloudflare/workers-types").WebSocket} webSocketServer
+ * @param {string} earlyDataHeader for ws 0rtt
+ * @param {(info: string)=> void} log for ws 0rtt
+ */
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 	let readableStreamCancel = false;
 	const stream = new ReadableStream({
@@ -535,6 +559,11 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 	return stream;
 }
 
+/**
+ * * @param { ArrayBuffer} dynamicProtocolBuffer 
+ * @param {string} userID 
+ * @returns 
+ */
 function processDynamicProtocolHeader(dynamicProtocolBuffer, userID) {
 	if (dynamicProtocolBuffer.byteLength < 24) {
 		return { hasError: true, message: 'invalid data' };
@@ -606,6 +635,13 @@ function processDynamicProtocolHeader(dynamicProtocolBuffer, userID) {
 	};
 }
 
+/**
+ * * @param {import("@cloudflare/workers-types").Socket} remoteSocket 
+ * @param {import("@cloudflare/workers-types").WebSocket} webSocket 
+ * @param {ArrayBuffer} dynamicProtocolResponseHeader 
+ * @param {(() => Promise<void>) | null} retry
+ * @param {*} log 
+ */
 async function remoteSocketToWS(remoteSocket, webSocket, dynamicProtocolResponseHeader, retry, log) {
 	let dynamicProtocolHeader = dynamicProtocolResponseHeader;
 	let hasIncomingData = false; 
@@ -638,6 +674,10 @@ async function remoteSocketToWS(remoteSocket, webSocket, dynamicProtocolResponse
 	}
 }
 
+/**
+ * * @param {string} base64Str 
+ * @returns 
+ */
 function base64ToArrayBuffer(base64Str) {
 	if (!base64Str) return { error: null };
 	try {
@@ -678,11 +718,19 @@ function stringify(arr, offset = 0) {
 	return uuid;
 }
 
+/**
+ * * @param {ArrayBuffer} udpChunk 
+ * @param {import("@cloudflare/workers-types").WebSocket} webSocket 
+ * @param {ArrayBuffer} dynamicProtocolResponseHeader 
+ * @param {(string)=> void} log 
+ */
 async function handleDNSQuery(udpChunk, webSocket, dynamicProtocolResponseHeader, log) {
 	try {
 		const dnsServer = '8.8.8.8'; 
 		const dnsPort = 53;
+		/** @type {ArrayBuffer | null} */
 		let dynamicProtocolHeader = dynamicProtocolResponseHeader;
+		/** @type {import("@cloudflare/workers-types").Socket} */
 		const tcpSocket = connect({ hostname: dnsServer, port: dnsPort });
 
 		log(`connected to ${dnsServer}:${dnsPort}`);
@@ -709,52 +757,41 @@ async function handleDNSQuery(udpChunk, webSocket, dynamicProtocolResponseHeader
 }
 
 /**
- * --- 核心修改：支持拉取并解析在线优选 IP 列表生成订阅 ---
- * @param {string} userID 
- * @param {string | null} hostName
+ * * @param {string} userID 
+ * * @param {string | null} hostName
+ * @returns {Promise<string>}
  */
 async function getDynamicProtocolConfig(userID, hostName) {
 	const protocol = 转码 + 转码2; 
     let vlessLinks = [];
-
-    // 1. 生成并加入默认的域名直连节点
-	const defaultLink = `${protocol}${符号}${userID}@${hostName}:443?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${encodeURIComponent(hostName)}`;
+    
+    const defaultLink = `${protocol}${符号}${userID}@${hostName}:443?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${encodeURIComponent(hostName)}`;
     vlessLinks.push(defaultLink);
 
-    // 2. 遍历拉取配置中的所有优选地址
     if (优选地址) {
         const sources = 优选地址.split(',').map(s => s.trim()).filter(Boolean);
         for (const source of sources) {
-            // 如果是 URL，则发起请求拉取列表
             if (/^https?:\/\//i.test(source)) {
                 try {
                     const res = await fetch(source, { cf: { cacheTtl: 300 } });
                     if (res.ok) {
                         const text = await res.text();
                         const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-                        
                         for (const line of lines) {
                             let address = line;
                             let port = 443;
                             let remark = hostName;
-
-                            // 提取行尾可能包含的节点备注 (如 1.1.1.1#美国)
                             if (address.includes('#')) {
                                 const parts = address.split('#');
                                 address = parts[0].trim();
                                 remark = parts[1].trim();
                             }
-
-                            // 提取非 IPv6 情况下的自定义端口
                             const portMatch = address.match(/:(\d+)$/);
                             if (portMatch && !address.startsWith('[')) {
                                 port = portMatch[1];
                                 address = address.replace(/:\d+$/, '');
                             }
-
-                            // 规范化纯 IPv6 地址 (自动加上 [])
                             let finalAddress = address.includes(':') && !address.startsWith('[') ? `[${address}]` : address;
-
                             const link = `${protocol}${符号}${userID}@${finalAddress}:${port}?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${encodeURIComponent(remark)}`;
                             vlessLinks.push(link);
                         }
@@ -763,23 +800,19 @@ async function getDynamicProtocolConfig(userID, hostName) {
                     console.error('获取优选地址列表失败:', source, e);
                 }
             } else {
-                // 如果用户配置的是单个静态 IP (如 104.16.0.1 或 104.16.0.1:443)
                 let address = source;
                 let port = 443;
-                
                 const portMatch = address.match(/:(\d+)$/);
                 if (portMatch && !address.startsWith('[')) {
                     port = portMatch[1];
                     address = address.replace(/:\d+$/, '');
                 }
-                
                 let finalAddress = address.includes(':') && !address.startsWith('[') ? `[${address}]` : address;
                 const link = `${protocol}${符号}${userID}@${finalAddress}:${port}?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${encodeURIComponent(hostName + " 优选")}`;
                 vlessLinks.push(link);
             }
         }
     }
-
-    // 最终将所有节点拼接，为了兼容各大客户端，直接转为 Base64 订阅格式
-	return btoa(vlessLinks.join('\n'));
+    
+    return btoa(vlessLinks.join('\n'));
 }
