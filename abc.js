@@ -1,20 +1,20 @@
+import { connect } from 'cloudflare:sockets';
 
 // ==================== 内置默认配置区 ====================
 let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
 
-// 1. 内置 ProxyIP 备用代理 (AI 流量将强制走此代理，普通流量直连失败后回退，格式: "ip:port")
+// 1. 内置 ProxyIP 备用代理 (AI流量强制走此代理，普通流量直连失败后回退，格式: "ip:port")
 const PROXYIP = "wok.woxxxxxx.nyc.mn"; 
 
-// 2. 内置 SOCKS5 / HTTP 备用代理 (普通流量直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
+// 2. 内置 SOCKS5 / HTTP 备用代理 (直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
 const SOCKS5 = ""; 
 
 // 3. 内置强制全局代理 (若填写则跳过直连，全量走此代理，格式: "socks5://..." 或 "http://...")
 const SOCKS5_GLOBAL = ""; 
 
-
 // ==================== 智能分流名单规则配置 ====================
 
-// 国外热门 AI 平台名单（强制走 ProxyIP）
+// 国外热门 AI 平台名单（命中将强制走 ProxyIP 中转）
 const AI_DOMAINS = [
   'openai.com',
   'chatgpt.com',
@@ -39,7 +39,7 @@ function isAiDomain(domain) {
   return AI_DOMAINS.some(k => lower.includes(k));
 }
 
-// DoH 查询 IPv6 (AAAA 记录，type=28) - 针对普通域名流量
+// DoH 查询 IPv6 (AAAA 记录，type=28) - 仅供普通流量备用
 async function resolveIPv6(domain) {
   if (!domain || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(domain) || domain.includes(':')) {
     return domain;
@@ -59,72 +59,6 @@ async function resolveIPv6(domain) {
   } catch (e) {}
   return domain;
 }
-
-// ==================== 优选订阅生成模块 ====================
-async function generateSubscription(host) {
-  const ipList = [];
-
-  // 并发拉取两个优选 IP 源
-  const fetchPromises = OPTIMAL_SOURCES.map(async (url) => {
-    try {
-      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, cf: { cacheTtl: 600 } });
-      if (res.ok) {
-        const text = await res.text();
-        const lines = text.split(/\r?\n/);
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith('#')) continue;
-
-          // 匹配常见格式: "IP:Port#备注" 或 "IP#备注" 或纯 "IP"
-          const parts = trimmed.split('#');
-          const addrPart = parts[0].trim();
-          const tag = parts[1] ? parts[1].trim() : '优选节点';
-
-          let ip = addrPart;
-          let port = 443;
-          if (addrPart.includes(':')) {
-            const [pIp, pPort] = addrPart.split(':');
-            ip = pIp;
-            port = parseInt(pPort) || 443;
-          }
-
-          if (ip) {
-            ipList.push({ ip, port, tag });
-          }
-        }
-      }
-    } catch (e) {}
-  });
-
-  await Promise.all(fetchPromises);
-
-  // 去重 (以 IP:Port 为准)
-  const uniqueNodes = [];
-  const seen = new Set();
-  for (const item of ipList) {
-    const key = `${item.ip}:${item.port}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniqueNodes.push(item);
-    }
-  }
-
-  // 兜底：若远端接口无返回或解析失败，使用内置默认域名作为回退节点
-  if (uniqueNodes.length === 0) {
-    uniqueNodes.push({ ip: host, port: 443, tag: '默认节点' });
-  }
-
-  // 拼接 vless:// 链接
-  const vlessUrls = uniqueNodes.map(({ ip, port, tag }) => {
-    const remark = encodeURIComponent(`${tag}-${ip}`);
-    // 注意：通过将 ip 填入节点地址，host/sni 填入 worker 域名，实现优选 IP 访问
-    return `vless://${UUID}@${ip}:${port}?encryption=none&security=tls&sni=${host}&fp=chrome&type=ws&host=${host}&path=%2F#${remark}`;
-  });
-
-  // Base64 编码返回订阅
-  const subContent = vlessUrls.join('\n');
-  return btoa(unescape(encodeURIComponent(subContent)));
-}
 // ========================================================
 
 const MAX_PENDING = 2 * 1024 * 1024, KEEPALIVE = 15000, STALL_TO = 8000, MAX_STALL = 12, MAX_RECONN = 24;
@@ -134,24 +68,8 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // 1. 处理优选订阅请求 (访问 /sub、/auto 或携带 UUID token 参数)
-    if (url.pathname === '/sub' || url.pathname === '/auto' || url.searchParams.get('token') === UUID) {
-      const sub = await generateSubscription(url.host);
-      return new Response(sub, {
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Cache-Control': 'no-cache',
-          'Subscription-Userinfo': 'upload=0; download=0; total=1073741824000000; expire=0'
-        }
-      });
-    }
-
-    // 2. 非 WebSocket 升级请求返回说明页（防扫描）
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
-      return new Response(`VLESS Node is running.\nSubscription URL: https://${url.host}/sub`, { 
-        status: 200,
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' }
-      });
+      return new Response('Hello World!', { status: 200 });
     }
 
     const { proxyIP, socks5, enableSocks, globalProxy } = parseProxyConfig(url.pathname);
@@ -410,7 +328,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
   };
 
   const tryConnect = async (host, port, addressType) => {
-    // 1. 全局强制代理优先
+    // 1. 全局代理优先
     if (globalProxy) {
       if (globalProxy.type === 'socks5')
         return await socks5Connect(addressType, host, port, globalProxy.cfg);
@@ -418,7 +336,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
         return await httpConnect(addressType, host, port, globalProxy.cfg);
     } 
 
-    // 2. 策略执行：命中 AI 域名，直接强制走 ProxyIP 中转
+    // 2. 命中 AI 域名，强制走 ProxyIP
     if (isAiDomain(host) && proxyIP) {
       try {
         const proxySocket = connect({ hostname: proxyIP.address, port: proxyIP.port });
@@ -429,19 +347,17 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
       }
     }
 
-    // 3. 常规流量：如果目标地址是一个域，则根据 IPv6 策略传出（DoH 解析 AAAA）
-    let targetHost = host;
-    if (addressType === 2) {
-      targetHost = await resolveIPv6(host);
-    }
+    // 3. 常规域名解析 IPv6 备用（按需开启）
+    // let targetHost = host;
+    // if (addressType === 2) {
+    //   targetHost = await resolveIPv6(host);
+    // }
 
     try {
-      // 尝试直连
-      const socket = connect({ hostname: targetHost, port });
+      const socket = connect({ hostname: host, port });
       if (socket.opened) await socket.opened;
       return socket;
     } catch (err) {
-      // 4. 普通流量直连异常时回退备用 SOCKS5 与 ProxyIP 代理
       if (!socks5 && !proxyIP) throw err;
 
       if (socks5) {
