@@ -1,19 +1,21 @@
+import { connect } from 'cloudflare:sockets';
+
+// ==================== 内置默认配置区 ====================
 let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
 
-// 1. 内置 ProxyIP 备用 (直连失败后回退，格式: "ip:port")
+// 1. 内置 ProxyIP 备用代理 (AI 流量将强制走此代理，普通流量直连失败后回退，格式: "ip:port")
 const PROXYIP = "wok.woxxxxxx.nyc.mn"; 
 
-// 2. 内置 SOCKS5 / HTTP 备用代理 (直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
+// 2. 内置 SOCKS5 / HTTP 备用代理 (普通流量直连失败后回退，格式: "user:pass@host:port" 或 "host:port")
 const SOCKS5 = ""; 
 
-// 3. 内置全局 (若填写则跳过直连，全量走此代理，格式: "socks5://..." 或 "http://...")
+// 3. 内置强制全局代理 (若填写则跳过直连，全量走此代理，格式: "socks5://..." 或 "http://...")
 const SOCKS5_GLOBAL = ""; 
-
 
 
 // ==================== 智能分流名单规则配置 ====================
 
-// 国外热门 AI 平台名单（通过 DoH 强制查询 AAAA 记录走 IPv6）
+// 国外热门 AI 平台名单（强制走 ProxyIP）
 const AI_DOMAINS = [
   'openai.com',
   'chatgpt.com',
@@ -38,7 +40,7 @@ function isAiDomain(domain) {
   return AI_DOMAINS.some(k => lower.includes(k));
 }
 
-// DoH 查询 IPv6 (AAAA 记录，type=28)
+// DoH 查询 IPv6 (AAAA 记录，type=28) - 针对普通域名流量
 async function resolveIPv6(domain) {
   if (!domain || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(domain) || domain.includes(':')) {
     return domain;
@@ -409,6 +411,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
   };
 
   const tryConnect = async (host, port, addressType) => {
+    // 1. 全局强制代理优先
     if (globalProxy) {
       if (globalProxy.type === 'socks5')
         return await socks5Connect(addressType, host, port, globalProxy.cfg);
@@ -416,16 +419,30 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
         return await httpConnect(addressType, host, port, globalProxy.cfg);
     } 
 
+    // 2. 策略执行：命中 AI 域名，直接强制走 ProxyIP 中转
+    if (isAiDomain(host) && proxyIP) {
+      try {
+        const proxySocket = connect({ hostname: proxyIP.address, port: proxyIP.port });
+        if (proxySocket.opened) await proxySocket.opened;
+        return proxySocket;
+      } catch (err) {
+        throw new Error('AI Domain forced ProxyIP failed');
+      }
+    }
+
+    // 3. 常规流量：如果目标地址是一个域，则根据 IPv6 策略传出（DoH 解析 AAAA）
     let targetHost = host;
-    if (addressType === 2 && isAiDomain(host)) {
+    if (addressType === 2) {
       targetHost = await resolveIPv6(host);
     }
 
     try {
+      // 尝试直连
       const socket = connect({ hostname: targetHost, port });
       if (socket.opened) await socket.opened;
       return socket;
     } catch (err) {
+      // 4. 普通流量直连异常时回退备用 SOCKS5 与 ProxyIP 代理
       if (!socks5 && !proxyIP) throw err;
 
       if (socks5) {
