@@ -14,21 +14,35 @@ const SOCKS5_GLOBAL = "";
 
 // ==================== 智能分流名单规则配置 ====================
 
-// 国外热门 AI 平台名单（命中将强制走 ProxyIP 的 IPv4 节点中转）
+// 国外热门 AI 平台名单（包含 Google/Gemini 全系列，命中将强制走 ProxyIP 的 IPv4 节点中转）
 const AI_DOMAINS = [
+  // === Google AI / Gemini 全系列 ===
+  'gemini.google.com',
+  'generativelanguage.googleapis.com',
+  'ai.google.dev',
+  'aistudio.google.com',
+  'makersuite.google.com',
+  'vertexai.googleapis.com',
+  'deepmind.google',
+  'deepmind.com',
+
+  // === OpenAI / ChatGPT ===
   'openai.com',
   'chatgpt.com',
   'oaistatic.com',
   'oaiusercontent.com',
+
+  // === Anthropic / Claude ===
   'anthropic.com',
   'claude.ai',
-  'gemini.google.com',
-  'generativelanguage.googleapis.com',
-  'ai.google.dev',
-  'x.ai',
-  'grok.com',
+
+  // === 微软 Copilot / 必应 ===
   'copilot.microsoft.com',
   'sydney.bing.com',
+
+  // === 其他热门 AI 平台 ===
+  'x.ai',
+  'grok.com',
   'perplexity.ai',
   'poe.com'
 ];
@@ -42,7 +56,7 @@ function isAiDomain(domain) {
 // DoH 查询 IPv4 (A 记录，type=1) - 用于强制 ProxyIP 走 IPv4
 async function resolveIPv4(domain) {
   if (!domain || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(domain) || domain.includes(':')) {
-    return domain; // 已经是 IP 则直接返回
+    return domain; // 如果已经是 IP 地址（包含 IPv4/IPv6），直接返回
   }
   try {
     const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=A`, {
@@ -51,13 +65,14 @@ async function resolveIPv4(domain) {
     });
     if (!res.ok) return domain;
     const data = await res.json();
-    const records = data.Answer?.filter(a => a.type === 1); // 1 为 A 记录
+    const records = data.Answer?.filter(a => a.type === 1); // 1 为 A 记录 (IPv4)
     if (records && records.length > 0) {
       return records[Math.floor(Math.random() * records.length)].data;
     }
   } catch (e) {}
   return domain;
 }
+
 // ========================================================
 
 const MAX_PENDING = 2 * 1024 * 1024, KEEPALIVE = 15000, STALL_TO = 8000, MAX_STALL = 12, MAX_RECONN = 24;
@@ -335,7 +350,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
         return await httpConnect(addressType, host, port, globalProxy.cfg);
     } 
 
-    // 2. 如果命中 AI 域名，主动发起 DoH 查询 A 记录，强制解析 ProxyIP 并走 IPv4 中转
+    // 2. 命中 AI 域名，主动发起 DoH 查询 A 记录，强制解析 ProxyIP 并走 IPv4 中转
     if (isAiDomain(host) && proxyIP) {
       try {
         const proxyHostIPv4 = await resolveIPv4(proxyIP.address);
@@ -343,7 +358,7 @@ const handle = (ws, proxyIP, socks5, enableSocks, globalProxy, earlyData) => {
         if (proxySocket.opened) await proxySocket.opened;
         return proxySocket;
       } catch (err) {
-        throw new Error('AI Domain forced ProxyIP failed');
+        throw new Error('AI Domain forced ProxyIP via IPv4 failed');
       }
     }
 
