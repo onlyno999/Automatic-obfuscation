@@ -1,4 +1,3 @@
-import { connect } from 'cloudflare:sockets';
 
 // ==================== 内置默认配置区 ====================
 let UUID = "bee9ac63-20ea-4b0b-876a-09831e5f755a";
