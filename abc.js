@@ -97,42 +97,84 @@ export default {
 							});
 						} else {
 							// 1. 获取自带的默认节点配置
-							const dynamicProtocolConfig = getDynamicProtocolConfig(userID, request.headers.get('Host'));
-							let finalSub = `${dynamicProtocolConfig}`;
+							const host = request.headers.get('Host');
+							const dynamicProtocolConfig = getDynamicProtocolConfig(userID, host);
+							let finalSubNodes = [dynamicProtocolConfig.trim()];
 
-							// 2. 自动拉取你的优选IP地址池
+							// 2. 参考知识库：自动拉取并解析优选 IP，生成 VLESS 链接
+							const ipList = [];
 							try {
+								// 第一步：拉取 dingyue.txt 获取源地址列表
 								const listResponse = await fetch(SUB_URL);
 								if (listResponse.ok) {
 									const listText = await listResponse.text();
-									// 过滤出有效的网址
+									// 过滤出有效的网址源
 									const urls = listText.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
 									
-									// 并发去抓取这些网址里的节点数据
+									// 第二步：并发抓取这些网址里的真实 IP 数据
 									const fetchPromises = urls.map(async (targetUrl) => {
 										try {
-											const res = await fetch(targetUrl);
-											return res.ok ? await res.text() : "";
+											const res = await fetch(targetUrl, { headers: { 'User-Agent': 'Mozilla/5.0' }, cf: { cacheTtl: 600 } });
+											if (res.ok) {
+												const text = await res.text();
+												const lines = text.split(/\r?\n/);
+												for (const line of lines) {
+													const trimmed = line.trim();
+													if (!trimmed || trimmed.startsWith('#')) continue;
+
+													// 匹配格式: "IP:Port#备注" 或纯 "IP"
+													const parts = trimmed.split('#');
+													const addrPart = parts[0].trim();
+													const tag = parts[1] ? parts[1].trim() : '优选节点';
+
+													let ip = addrPart;
+													let port = 443;
+													if (addrPart.includes(':')) {
+														const [pIp, pPort] = addrPart.split(':');
+														ip = pIp;
+														port = parseInt(pPort) || 443;
+													}
+
+													if (ip) {
+														ipList.push({ ip, port, tag });
+													}
+												}
+											}
 										} catch (e) {
-											return ""; 
+											// 忽略单次抓取错误
 										}
 									});
 									
-									const allContents = await Promise.all(fetchPromises);
-									const remoteNodes = allContents.join('\n').trim();
-									// 拼接到最终的订阅内容里
-									if (remoteNodes) {
-										finalSub += '\n' + remoteNodes;
-									}
+									await Promise.all(fetchPromises);
 								}
 							} catch (error) {
 								console.log("拉取订阅地址池失败", error);
 							}
 
-							// 3. 一次性返回所有节点给代理软件
-							return new Response(finalSub, {
+							// 3. 去重并组装 vless 链接
+							const seen = new Set();
+							for (const item of ipList) {
+								const key = `${item.ip}:${item.port}`;
+								if (!seen.has(key)) {
+									seen.add(key);
+									const remark = encodeURIComponent(`${item.tag}-${item.ip}`);
+									// 使用你的 Worker 域名作为 host/sni，优选 IP 作为地址
+									const vlessUrl = `vless://${userID}@${item.ip}:${item.port}?encryption=none&security=tls&sni=${host}&fp=randomized&type=ws&host=${host}&path=%2F%3Fed%3D2048#${remark}`;
+									finalSubNodes.push(vlessUrl);
+								}
+							}
+
+							// 4. 合并并进行 Base64 编码
+							const subContent = finalSubNodes.join('\n');
+							const b64Sub = btoa(unescape(encodeURIComponent(subContent)));
+
+							// 返回 Base64 订阅内容
+							return new Response(b64Sub, {
 								status: 200,
-								headers: { "Content-Type": "text/plain;charset=utf-8" }
+								headers: { 
+									"Content-Type": "text/plain;charset=utf-8",
+									"Cache-Control": "no-cache"
+								}
 							});
 						}
 					}
@@ -717,5 +759,5 @@ async function handleDNSQuery(udpChunk, webSocket, dynamicProtocolResponseHeader
 function getDynamicProtocolConfig(userID, hostName) {
 	const protocol = 转码 + 转码2; 
 	const dynamicProtocolMain = `${protocol}${符号}${userID}@${hostName}:443?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${hostName}`;
-	return `\nv2ray:\n${dynamicProtocolMain}\n`;
+	return `${dynamicProtocolMain}`;
 }
