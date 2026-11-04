@@ -1,178 +1,46 @@
-let 转码 = 'vl', 转码2 = 'ess', 符号 = '://';
+Let 转码 = 'vl', 转码2 = 'ess', 符号 = '://';
 
 // version base on commit 58686d5d125194d34a1137913b3a64ddcf55872f, time is 2024-11-27 09:26:02 UTC.
 // @ts-ignore
 import { connect } from 'cloudflare:sockets';
 
 // How to generate your own UUID:
-// [Windows] Press "Win + R", input cmd and run:  Powershell -NoExit -Command "[guid]::NewGuid()"
 let userID = 'd342d11e-d424-4583-b36e-524ab1f0afa4';
 
 let proxyIP = 'wok.woxxxxxx.nyc.mn'; // 确保这里有默认值或者通过环境变量设置。
 // --- 原有变量 ---
 let proxyPort = 443; // 默认端口为 443
 
-// ==================== 优选订阅数据源 ====================
-const OPTIMAL_SOURCES = [
-  "https://raw.githubusercontent.com/Senflare/Senflare-IP/refs/heads/main/Senflare-Pro.txt",
-  "https://raw.githubusercontent.com/Senflare/Senflare-IP/refs/heads/main/Senflare.txt",
-  "https://bestcf.pages.dev/xinyitang3/ipv4.txt",
-  "https://bestcf.pages.dev/wetest/ipv4.txt",
-];
-
 // --- 新增：伪装页面相关的变量和函数 ---
-async function serveDisguisePage() {
-  return new Response('Hello World!', {
-    status: 200,
-    headers: { 'Content-Type': 'text/plain; charset=utf-8' }
-  });
+const FAKE_WEBSITE = "https://Cf-worker-dir-bke.pages.dev"; // 伪装地址
+
+// --- 新增：你的优选IP地址池直链 ---
+const SUB_URL = "https://github.xxxxxxxx.nyc.mn/onlyno999/xxxxxxxxxx/main/dingyue.txt";
+
+async function serveDisguisePage(request) {
+	const url = new URL(request.url);
+	const fakeUrl = new URL(FAKE_WEBSITE);
+	fakeUrl.pathname = url.pathname;
+	fakeUrl.search = url.search;
+
+	const fakeReq = new Request(fakeUrl, {
+		method: request.method,
+		headers: request.headers,
+		body: request.body,
+		redirect: "follow"
+	});
+
+	try {
+		const response = await fetch(fakeReq);
+		const newResponse = new Response(response.body, response);
+		// 清除安全头部，防止伪装网页无法加载
+		newResponse.headers.delete("x-frame-options");
+		newResponse.headers.delete("content-security-policy");
+		return newResponse;
+	} catch (e) {
+		return new Response("Website is currently unavailable.", { status: 502 });
+	}
 }
-
-// ==================== AI 域名分流与 DoH A/AAAA 解析配置 ====================
-// 国外热门 AI 平台名单（包含 Google/Gemini 全系列，命中将强制走 ProxyIP 的 IPv4 中转）
-const AI_DOMAINS = [
-  // === Google AI / Gemini 全系列 ===
-  'gemini.google.com',
-  'generativelanguage.googleapis.com',
-  'ai.google.dev',
-  'aistudio.google.com',
-  'makersuite.google.com',
-  'vertexai.googleapis.com',
-  'deepmind.google',
-  'deepmind.com',
-
-  // === OpenAI / ChatGPT ===
-  'openai.com',
-  'chatgpt.com',
-  'oaistatic.com',
-  'oaiusercontent.com',
-
-  // === Anthropic / Claude ===
-  'anthropic.com',
-  'claude.ai',
-
-  // === 微软 Copilot / 必应 ===
-  'copilot.microsoft.com',
-  'sydney.bing.com',
-
-  // === 其他热门 AI 平台 ===
-  'x.ai',
-  'grok.com',
-  'perplexity.ai',
-  'poe.com'
-];
-
-function isAiDomain(domain) {
-  if (!domain || typeof domain !== 'string') return false;
-  const lower = domain.toLowerCase();
-  return AI_DOMAINS.some(k => lower.includes(k));
-}
-
-// DoH 查询 IPv4 (A 记录，type=1) - 用于强制 ProxyIP 走 IPv4
-async function resolveIPv4(domain) {
-  if (!domain || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(domain) || domain.includes(':')) {
-    return domain;
-  }
-  try {
-    const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=A`, {
-      headers: { 'accept': 'application/dns-json' },
-      cf: { cacheTtl: 300 }
-    });
-    if (!res.ok) return domain;
-    const data = await res.json();
-    const records = data.Answer?.filter(a => a.type === 1); // 1 为 A 记录
-    if (records && records.length > 0) {
-      return records[Math.floor(Math.random() * records.length)].data;
-    }
-  } catch (e) {}
-  return domain;
-}
-
-// DoH 查询 IPv6 (AAAA 记录，type=28) - 供普通流量传出使用
-async function resolveIPv6(domain) {
-  if (!domain || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(domain) || domain.includes(':')) {
-    return domain;
-  }
-  try {
-    const res = await fetch(`https://1.1.1.1/dns-query?name=${encodeURIComponent(domain)}&type=AAAA`, {
-      headers: { 'accept': 'application/dns-json' },
-      cf: { cacheTtl: 300 }
-    });
-    if (!res.ok) return domain;
-    const data = await res.json();
-    const records = data.Answer?.filter(a => a.type === 28); // 28 为 AAAA 记录
-    if (records && records.length > 0) {
-      const ipv6Addr = records[Math.floor(Math.random() * records.length)].data;
-      return ipv6Addr.startsWith('[') ? ipv6Addr : `[${ipv6Addr}]`;
-    }
-  } catch (e) {}
-  return domain;
-}
-
-// ==================== 优选订阅生成模块 ====================
-async function generateSubscription(host) {
-  const ipList = [];
-
-  // 并发拉取优选 IP 源
-  const fetchPromises = OPTIMAL_SOURCES.map(async (url) => {
-    try {
-      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, cf: { cacheTtl: 600 } });
-      if (res.ok) {
-        const text = await res.text();
-        const lines = text.split(/\r?\n/);
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith('#')) continue;
-
-          const parts = trimmed.split('#');
-          const addrPart = parts[0].trim();
-          const tag = parts[1] ? parts[1].trim() : '优选节点';
-
-          let ip = addrPart;
-          let port = 443;
-          if (addrPart.includes(':')) {
-            const [pIp, pPort] = addrPart.split(':');
-            ip = pIp;
-            port = parseInt(pPort) || 443;
-          }
-
-          if (ip) {
-            ipList.push({ ip, port, tag });
-          }
-        }
-      }
-    } catch (e) {}
-  });
-
-  await Promise.all(fetchPromises);
-
-  // 去重 (以 IP:Port 为准)
-  const uniqueNodes = [];
-  const seen = new Set();
-  for (const item of ipList) {
-    const key = `${item.ip}:${item.port}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      uniqueNodes.push(item);
-    }
-  }
-
-  // 兜底：若远端接口无返回或解析失败，使用内置默认域名作为回退节点
-  if (uniqueNodes.length === 0) {
-    uniqueNodes.push({ ip: host, port: 443, tag: '默认节点' });
-  }
-
-  // 拼接 vless:// 链接
-  const vlessUrls = uniqueNodes.map(({ ip, port, tag }) => {
-    const remark = encodeURIComponent(`${tag}-${ip}`);
-    return `vless://${userID}@${ip}:${port}?encryption=none&security=tls&sni=${host}&fp=chrome&type=ws&host=${host}&path=%2F%3Fed%3D2048#${remark}`;
-  });
-
-  // Base64 编码返回订阅
-  const subContent = vlessUrls.join('\n');
-  return btoa(unescape(encodeURIComponent(subContent)));
-}
-// ======================================================================
 
 if (!isValidUUID(userID)) {
 	throw new Error('uuid is not valid');
@@ -215,25 +83,12 @@ export default {
 
 			console.log(`最终解析的布尔值 隐藏: ${isHidden}, 最终代理出站配置: ${proxyIP}`);
 
-			const url = new URL(request.url);
-
-			// 1. 处理优选订阅请求 (访问 /sub、/auto 或携带 UUID token 参数)
-			if (url.pathname === '/sub' || url.pathname === '/auto' || url.searchParams.get('token') === userID) {
-				const sub = await generateSubscription(url.host);
-				return new Response(sub, {
-					headers: {
-						'Content-Type': 'text/plain; charset=utf-8',
-						'Cache-Control': 'no-cache',
-						'Subscription-Userinfo': 'upload=0; download=0; total=1073741824000000; expire=0'
-					}
-				});
-			}
-
 			const upgradeHeader = request.headers.get('Upgrade');
 			if (!upgradeHeader || upgradeHeader !== 'websocket') {
+				const url = new URL(request.url);
 				switch (url.pathname) {
 					case '/': 
-						return serveDisguisePage(); 
+						return serveDisguisePage(request); 
 					case `/${userID}`: {
 						if (isHidden) {
 							return new Response(sarcasmMessage, {
@@ -241,15 +96,48 @@ export default {
 								headers: { "Content-Type": "text/plain;charset=utf-8" }
 							});
 						} else {
+							// 1. 获取自带的默认节点配置
 							const dynamicProtocolConfig = getDynamicProtocolConfig(userID, request.headers.get('Host'));
-							return new Response(`${dynamicProtocolConfig}`, {
+							let finalSub = `${dynamicProtocolConfig}`;
+
+							// 2. 自动拉取你的优选IP地址池
+							try {
+								const listResponse = await fetch(SUB_URL);
+								if (listResponse.ok) {
+									const listText = await listResponse.text();
+									// 过滤出有效的网址
+									const urls = listText.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+									
+									// 并发去抓取这些网址里的节点数据
+									const fetchPromises = urls.map(async (targetUrl) => {
+										try {
+											const res = await fetch(targetUrl);
+											return res.ok ? await res.text() : "";
+										} catch (e) {
+											return ""; 
+										}
+									});
+									
+									const allContents = await Promise.all(fetchPromises);
+									const remoteNodes = allContents.join('\n').trim();
+									// 拼接到最终的订阅内容里
+									if (remoteNodes) {
+										finalSub += '\n' + remoteNodes;
+									}
+								}
+							} catch (error) {
+								console.log("拉取订阅地址池失败", error);
+							}
+
+							// 3. 一次性返回所有节点给代理软件
+							return new Response(finalSub, {
 								status: 200,
 								headers: { "Content-Type": "text/plain;charset=utf-8" }
 							});
 						}
 					}
 					default:
-						// 融合知识库：支持通过 HTTP 请求路径直接动态切换临时 ProxyIP（例如访问：/proxyip=socks://user:pass@host:port）
+						// 融合知识库：支持通过 HTTP 请求路径直接动态切换临时 ProxyIP
 						if (url.pathname.startsWith('/proxyip=')) {
 							try {
 								const pathProxyIP = decodeURIComponent(url.pathname.substring(9)).trim();
@@ -261,10 +149,12 @@ export default {
 								}
 							} catch (e) {}
 						}
-						return new Response('Not found', { status: 404 });
+						// 陌生路径不再报404，一律返回伪装页面
+						return serveDisguisePage(request);
 				}
 			} else {
 				// 融合知识库：WebSocket 请求时，支持从路径参数或 URL 参数中提取动态代理
+				const url = new URL(request.url);
 				let wsPathProxyIP = null;
 				if (url.pathname.startsWith('/proxyip=')) {
 					try {
@@ -291,7 +181,6 @@ function parseProxyAddress(serverStr) {
     if (!serverStr) return null;
     serverStr = serverStr.trim();
     
-    // 解析 SOCKS5
     if (serverStr.startsWith('socks://') || serverStr.startsWith('socks5://')) {
         const urlStr = serverStr.replace(/^socks:\/\//, 'socks5://');
         try {
@@ -306,7 +195,6 @@ function parseProxyAddress(serverStr) {
         } catch (e) { return null; }
     }
     
-    // 解析 HTTP
     if (serverStr.startsWith('http://') || serverStr.startsWith('https://')) {
         try {
             const url = new URL(serverStr);
@@ -320,7 +208,6 @@ function parseProxyAddress(serverStr) {
         } catch (e) { return null; }
     }
     
-    // 处理 IPv6 [host]:port 格式
     if (serverStr.startsWith('[')) {
         const closeBracket = serverStr.indexOf(']');
         if (closeBracket > 0) {
@@ -332,11 +219,10 @@ function parseProxyAddress(serverStr) {
                     return { type: 'direct', host, port };
                 }
             }
-            return { type: 'direct', host, port: proxyPort };
+            return { type: 'direct', host, port: 443 };
         }
     }
 
-    // 普通 ip:port 或 域名:port 格式
     const lastColonIndex = serverStr.lastIndexOf(':');
     if (lastColonIndex > 0) {
         const host = serverStr.substring(0, lastColonIndex);
@@ -347,7 +233,7 @@ function parseProxyAddress(serverStr) {
         }
     }
     
-    return { type: 'direct', host: serverStr, port: proxyPort };
+    return { type: 'direct', host: serverStr, port: 443 };
 }
 
 /**
@@ -456,8 +342,6 @@ async function connectToHttp(proxyConfig, targetHost, targetPort, initialData) {
  * 接收经过高级解析整合后的 runtimeProxy 配置字符串
  */
 async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
-
-	/** @type {import("@cloudflare/workers-types").WebSocket[]} */
 	// @ts-ignore
 	const webSocketPair = new WebSocketPair();
 	const [client, webSocket] = Object.values(webSocketPair);
@@ -473,7 +357,6 @@ async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
 
 	const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
 
-	/** @type {{ value: import("@cloudflare/workers-types").Socket | null}}*/
 	let remoteSocketWapper = {
 		value: null,
 	};
@@ -524,7 +407,6 @@ async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
 				return handleDNSQuery(rawClientData, webSocket, dynamicProtocolResponseHeader, log);
 			}
 			
-			// 处理 TCP 出站连接，传递提取到的高级代理字符串
 			await handleTCPOutBound(
 				remoteSocketWapper, 
 				addressType, 
@@ -551,37 +433,20 @@ async function dynamicProtocolOverWSHandler(request, runtimeProxy) {
 }
 
 /**
- * 底层出站逻辑：AI 流量强制走 IPv4 代理，直连失败或显式配置协议时走代理链
+ * 底层出站逻辑：优先尝试直连，直连失败或显式配置协议时走代理链
  */
 async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, dynamicProtocolResponseHeader, log, runtimeProxy) {
 	
-	const parsedProxy = parseProxyAddress(runtimeProxy);
-	
-	// 判断是否命中 AI 域名
-	const isAi = addressType === 2 && isAiDomain(addressRemote);
-
-	// 判断是否强制使用全局中转代理（或是因命中 AI 域名而被强制中转）
-	const isForceProxy = parsedProxy && (parsedProxy.type === 'socks5' || parsedProxy.type === 'http' || isAi);
-
-	// 直连连接器（普通网站走 IPv6 策略传出；如果是ProxyIP回退且仍是AI域名，强制解IPv4建立连接）
-	async function connectDirect(address, port, data, useIPv6 = false) {
-		let targetHost = address;
-		
-		if (useIPv6 && addressType === 2 && !isAi) {
-			// 普通流量尝试 IPv6 策略传出
-			targetHost = await resolveIPv6(address) || address;
-		}
-
-		const tcpSocket = connect({ hostname: targetHost, port: port });
+	async function connectDirect(address, port, data) {
+		const tcpSocket = connect({ hostname: address, port: port });
 		remoteSocketWapper.value = tcpSocket;
-		log(`Direct connected to ${targetHost}:${port}`);
+		log(`Direct connected to ${address}:${port}`);
 		const writer = tcpSocket.writable.getWriter();
 		await writer.write(data); 
 		writer.releaseLock();
 		return tcpSocket;
 	}
 
-	// 代理服务器链式连接器
 	async function connectViaProxy(proxyConfig, data) {
 		let tcpSocket;
 		if (proxyConfig.type === 'socks5') {
@@ -589,26 +454,21 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 		} else if (proxyConfig.type === 'http' || proxyConfig.type === 'https') {
 			tcpSocket = await connectToHttp(proxyConfig, addressRemote, portRemote, data);
 		} else {
-			// ProxyIP 直接中转模式
-			let targetProxyHost = proxyConfig.host;
-			// 如果是 AI 流量，强制解析 ProxyIP 走 IPv4 协议，防止 IP 不净或被判断地域异常
-			if (isAi || targetProxyHost) {
-				targetProxyHost = await resolveIPv4(targetProxyHost) || targetProxyHost;
-				log(`Traffic routed via IPv4 ProxyIP: ${targetProxyHost}`);
-			}
-			tcpSocket = await connectDirect(targetProxyHost, proxyConfig.port, data, false);
+			tcpSocket = await connectDirect(proxyConfig.host, proxyConfig.port, data);
 		}
 		remoteSocketWapper.value = tcpSocket;
 		log(`Proxy chain connected via [${proxyConfig.type}] to ${addressRemote}:${portRemote}`);
 		return tcpSocket;
 	}
 
-	// 触发重试/回退的安全边界机制
+	const parsedProxy = parseProxyAddress(runtimeProxy);
+	const isForceProxy = parsedProxy && (parsedProxy.type === 'socks5' || parsedProxy.type === 'http');
+
 	async function retryFallback() {
 		try {
 			if (isForceProxy) {
 				log(`Proxy chain failed. Falling back to direct connection: ${addressRemote}:${portRemote}`);
-				const fallbackSocket = await connectDirect(addressRemote, portRemote, rawClientData, false);
+				const fallbackSocket = await connectDirect(addressRemote, portRemote, rawClientData);
 				setupSocketLifecycle(fallbackSocket);
 			} else if (parsedProxy) {
 				log(`Direct connection failed. Retrying through proxy chain: ${runtimeProxy}`);
@@ -630,27 +490,20 @@ async function handleTCPOutBound(remoteSocketWapper, addressType, addressRemote,
 		remoteSocketToWS(socket, webSocket, dynamicProtocolResponseHeader, null, log);
 	}
 
-	// 建立首发数据流
 	try {
 		if (isForceProxy) {
 			let tcpSocket = await connectViaProxy(parsedProxy, rawClientData);
 			remoteSocketToWS(tcpSocket, webSocket, dynamicProtocolResponseHeader, retryFallback, log);
 		} else {
-			// 普通流量：调用 connectDirect 时传入 true，激活 IPv6 策略传出
-			let tcpSocket = await connectDirect(addressRemote, portRemote, rawClientData, true);
+			let tcpSocket = await connectDirect(addressRemote, portRemote, rawClientData);
 			remoteSocketToWS(tcpSocket, webSocket, dynamicProtocolResponseHeader, retryFallback, log);
 		}
 	} catch (err) {
-		log(`Initial routing attempt error: ${err.message}. Triggering backup chain...`);
+		log(`Initial direct routing attempt error: ${err.message}. Triggering backup chain...`);
 		await retryFallback();
 	}
 }
 
-/**
- * * @param {import("@cloudflare/workers-types").WebSocket} webSocketServer
- * @param {string} earlyDataHeader for ws 0rtt
- * @param {(info: string)=> void} log for ws 0rtt
- */
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 	let readableStreamCancel = false;
 	const stream = new ReadableStream({
@@ -688,11 +541,6 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 	return stream;
 }
 
-/**
- * * @param { ArrayBuffer} dynamicProtocolBuffer 
- * @param {string} userID 
- * @returns 
- */
 function processDynamicProtocolHeader(dynamicProtocolBuffer, userID) {
 	if (dynamicProtocolBuffer.byteLength < 24) {
 		return { hasError: true, message: 'invalid data' };
@@ -764,13 +612,6 @@ function processDynamicProtocolHeader(dynamicProtocolBuffer, userID) {
 	};
 }
 
-/**
- * * @param {import("@cloudflare/workers-types").Socket} remoteSocket 
- * @param {import("@cloudflare/workers-types").WebSocket} webSocket 
- * @param {ArrayBuffer} dynamicProtocolResponseHeader 
- * @param {(() => Promise<void>) | null} retry
- * @param {*} log 
- */
 async function remoteSocketToWS(remoteSocket, webSocket, dynamicProtocolResponseHeader, retry, log) {
 	let dynamicProtocolHeader = dynamicProtocolResponseHeader;
 	let hasIncomingData = false; 
@@ -803,10 +644,6 @@ async function remoteSocketToWS(remoteSocket, webSocket, dynamicProtocolResponse
 	}
 }
 
-/**
- * * @param {string} base64Str 
- * @returns 
- */
 function base64ToArrayBuffer(base64Str) {
 	if (!base64Str) return { error: null };
 	try {
@@ -847,19 +684,11 @@ function stringify(arr, offset = 0) {
 	return uuid;
 }
 
-/**
- * * @param {ArrayBuffer} udpChunk 
- * @param {import("@cloudflare/workers-types").WebSocket} webSocket 
- * @param {ArrayBuffer} dynamicProtocolResponseHeader 
- * @param {(string)=> void} log 
- */
 async function handleDNSQuery(udpChunk, webSocket, dynamicProtocolResponseHeader, log) {
 	try {
 		const dnsServer = '8.8.8.8'; 
 		const dnsPort = 53;
-		/** @type {ArrayBuffer | null} */
 		let dynamicProtocolHeader = dynamicProtocolResponseHeader;
-		/** @type {import("@cloudflare/workers-types").Socket} */
 		const tcpSocket = connect({ hostname: dnsServer, port: dnsPort });
 
 		log(`connected to ${dnsServer}:${dnsPort}`);
@@ -885,11 +714,6 @@ async function handleDNSQuery(udpChunk, webSocket, dynamicProtocolResponseHeader
 	}
 }
 
-/**
- * * @param {string} userID 
- * * @param {string | null} hostName
- * @returns {string}
- */
 function getDynamicProtocolConfig(userID, hostName) {
 	const protocol = 转码 + 转码2; 
 	const dynamicProtocolMain = `${protocol}${符号}${userID}@${hostName}:443?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${hostName}`;
