@@ -1,4 +1,4 @@
-Let 转码 = 'vl', 转码2 = 'ess', 符号 = '://';
+let 转码 = 'vl', 转码2 = 'ess', 符号 = '://';
 
 // version base on commit 58686d5d125194d34a1137913b3a64ddcf55872f, time is 2024-11-27 09:26:02 UTC.
 // @ts-ignore
